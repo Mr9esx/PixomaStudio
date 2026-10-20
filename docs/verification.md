@@ -174,6 +174,10 @@ DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`
 
 镜像内应用已复制到 `.local-cache/bundle-final.CFap2e/installed/Pixoma Studio.app`，复制后的应用签名和主程序 SHA-256 与构建产物一致。镜像包含 `/Applications` 链接，应用包含 FFmpeg 程序、许可证、源码与构建参数；挂载的镜像已经正常退出。该复制出的应用尚未启动，页面验收仍使用清单记录状态。
 
+## 本地 Git 仓库
+
+仓库根目录为 `/Users/mr9esx/Documents/PixomaStudio`，分支为 `codex/desktop-studio`。应用源码与验证资料提交为 `1aec1dff37ae3ea72f49a53d320e75a4055aa2f8`；author 和 committer 均为 `李卓洲 <1138099359@qq.com>`。缓存、依赖目录、构建产物和本地配置没有纳入提交。
+
 ## 待完成的验证
 
 - [前端与安装包验收清单](frontend-checklist.md)记录页面操作、已有接口证据与安装包交互状态；Studio 共同业务文件的差异已逐项核查。
