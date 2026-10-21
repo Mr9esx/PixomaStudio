@@ -132,7 +132,7 @@
 | `hdiutil verify` | 最新 DMG 的全部校验和通过 |
 | 原工程目录访问限制 | 使用 `sandbox-exec` 禁止读取 `/Users/mr9esx/Documents/Pixoma`，读取原工程 `AGENTS.md` 的校准检查返回 `Operation not permitted`。在相同限制下，`pnpm install --frozen-lockfile`、FFmpeg 准备和 `CI=true pnpm tauri build --ci` 全部通过，构建包含前端、类型、Rust、应用签名与 DMG 生成。检查使用本机已有依赖缓存 |
 | 源码符号链接 | `src/`、`public/`、`scripts/`、Rust 源码、测试、示例和数据库迁移目录均没有符号链接 |
-| 安装包实际页面 | 从 DMG 复制应用并指定独立数据目录，没有平台地址环境变量时读取并保存构建地址；登录、项目创建、项目选择、文档创建和资产内容展示通过。本次模型运行因系统凭据授权失败而结束，模型请求记录为 0，尚未获得模型回复证据；系统锁屏期间无法继续页面操作 |
+| 安装包实际页面 | 从 DMG 复制应用并指定独立数据目录，没有平台地址环境变量时读取并保存构建地址；登录、项目、文档、图片和视频导入、图片预览、视频播放、单项及 ZIP 导出通过。最新安装副本恢复登录凭据等待系统钥匙串授权；模型回复尚未取得成功证据 |
 | 平台 `pnpm test src/config/menu.test.ts` | 5 项通过 |
 | 平台 `pnpm exec vitest run --config vite.config.ts src/context/search-provider.test.tsx --browser.headless` | 7 项通过，关闭失败截图 |
 
@@ -172,7 +172,19 @@ sandbox-exec -p '(version 1) (allow default) (deny file-read* (subpath "/Users/m
 
 DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `7da62a9a8b3c10c193250bae20e68968857803b5a38b87e1128e5f92e939a8b0`。应用和随包 FFmpeg 的严格签名检查、DMG 全部校验和、镜像内应用的严格签名检查均通过。
 
-镜像内应用已复制到 `.local-cache/bundle-final.CFap2e/installed/Pixoma Studio.app`，复制后的应用签名和主程序 SHA-256 与构建产物一致。镜像包含 `/Applications` 链接，应用包含 FFmpeg 程序、许可证、源码与构建参数；挂载的镜像已经正常退出。该复制出的应用尚未启动，页面验收仍使用清单记录状态。
+镜像内应用已复制到 `.local-cache/bundle-final.CFap2e/installed/Pixoma Studio.app`，复制后的应用签名和主程序 SHA-256 与构建产物一致。镜像包含 `/Applications` 链接，应用包含 FFmpeg 程序、许可证、源码与构建参数；挂载的镜像已经正常退出。该复制出的应用已使用原测试数据目录启动，恢复登录凭据时等待系统钥匙串授权，页面验收按清单记录状态。
+
+## 安装包资产页面检查
+
+本轮页面操作使用 `.local-cache/bundle-check.BqONOZ/installed/Pixoma Studio.app`，数据目录为 `.local-cache/bundle-check.BqONOZ/data`。重新启动后，页面读取原账号、项目和文档。文档在项目中的名称改为 `安装包文稿检查.md`，评分保存为 4，标签保存为 `安装包验收`；实际 SQLite 记录与页面一致。
+
+原生文件选择器导入 `src-tauri/tests/fixtures/red.mp4` 和 `.local-cache/ffmpeg-first-frame.png`，所属项目均为 `安装包创作检查`。视频显示 80 × 40、1,571 字节、原文件修改日期 `2026/10/19 09:45`，封面及调色盘生成成功；点击播放后出现实际媒体控件和暂停按钮，播放结束后显示播放按钮。图片显示 80 × 40、151 字节、原文件修改日期 `2026/10/19 09:51`，详情及调色盘读取通过，放大和恢复详情操作通过。时间定位未获得足够证据，继续保留待验证。
+
+发布程序通过当前可执行程序目录选择随包 FFmpeg，未设置开发用程序路径。实际视频导入和封面生成因此覆盖安装包随附程序的使用。
+
+单项导出通过原生保存对话框选择 `.local-cache/bundle-ui-20261021`，生成 `安装包文稿检查.md`；再次导出后取消保存，正常返回原详情。实际导出文件与原资产内容通过 `cmp` 比较一致。批量选择文档和视频后导出 `assets.zip`，标准库 `zipfile` 读取中文文件名并解压成功；其中 `001-red.mp4` 与 `002-安装包文稿检查.md` 分别与原视频、单项导出文档通过 `cmp` 比较一致。
+
+页面操作结束后，通过应用退出操作正常结束原安装副本，退出码为 0。随后启动最新安装副本，实际打开同一数据库；进程采样显示恢复平台登录凭据时等待系统钥匙串授权。当前请求未自动处理系统授权窗口，完整恢复继续保留待验证。
 
 ## 本地 Git 仓库
 
@@ -185,5 +197,5 @@ DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`
 - 页面中的完整操作需要在业务接口齐全后继续验证。
 - 技能目录与正文分页、官方专家、专家步骤、卡片和个人发布同步已有真实检查；发布操作的完整页面交互仍需验收，原有前端 API 与真实原生 Commands 的往返检查已经通过。
 - 图片引用在原生页面中的完整选择、发送与历史读取操作仍需交互验收。
-- 文件保存对话框和媒体预览尚未完成桌面交互验收。
-- 安装包完整运行仍待完成。安装包已经生成并通过签名完整性和 DMG 校验和检查；页面操作需要系统解锁，模型调用需要完成 macOS 钥匙串授权后继续验证。
+- 文件保存对话框、单项及 ZIP 导出、图片预览和视频播放已完成本轮检查；音频预览与视频时间定位仍需桌面交互验收。
+- 安装包完整运行仍待完成。安装包已经生成并通过签名完整性和 DMG 校验和检查；最新安装副本的登录恢复与模型调用需要完成 macOS 钥匙串授权后继续验证。
