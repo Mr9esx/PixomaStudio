@@ -68,6 +68,7 @@
 - Channel 验证包含超过 8 KiB 的实际文档读取工具结果，核对完整内容、保存记录与接收顺序，订阅等待全部消息送达后结束。
 - 达到模型输出限制时保留生成内容与实际用量，运行保存错误状态。
 - 后续历史读取包含失败、取消和输出受限运行的用户消息、已保存正文与实际工具结果；工具结果未知保留明确说明。实际文件与数据库恢复检查确认读取历史不会再次执行工具。
+- 会话页面从实际保存的流式事件恢复失败和取消运行的未完成正文。重新打开数据库后保留已收到的完整正文，后续完整回复和已保存的正文均只展示一次；账号范围继续受原会话检查保护。
 - 原生窗口通过本地媒体协议读取文档，Range 请求返回实际选定的字节。
 - 真实平台 MCP 初始化、官方工具发现与连接关闭通过。
 - 真实 MCP 拒绝错误凭据；查询不存在的任务返回服务错误，随后可以继续读取工作流目录。
@@ -84,7 +85,7 @@
 | `pnpm test` | 5 项通过 |
 | `pnpm build` | 通过，包含构建文件大小提示 |
 | `cargo check --manifest-path src-tauri/Cargo.toml --all-targets` | 通过 |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | 55 项通过，23 项真实服务检查单独执行 |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | 55 项通过，24 项真实服务检查单独执行 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration platform:: -- --ignored` | 真实账号流程与官方技能保存通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration agent::real_model_streams_text -- --ignored` | 三种协议均通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration agent::real_model_creates_a_document -- --ignored` | 三种协议均通过 |
@@ -95,6 +96,7 @@
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp::tests::image_results` | 标准 MCP 图片转换保留实际 PNG 数据，文本 JSON 不包含图片编码 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib tools::tests::mcp_image_conversion` | 图片格式转换错误时保存完整响应、错误事件和明确结束状态；重新打开数据库检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration agent::real_model_continues -- --ignored` | 三种协议均通过输出受限后的请求状态、原用户消息、已生成正文与连续对话检查 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test integration agent::real_cancelled_text -- --ignored` | 真实模型开始输出后取消；SQLite 重新打开后的会话正文与全部实际文字事件逐字一致。后续完整真实回复和取消正文分别展示一次，错误账号读取被拒绝 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration compaction:: -- --ignored` | 三种协议均通过启用图片能力时的资料摘要、缓存恢复、用量与超长当前消息检查 |
 | `cargo test --manifest-path src-tauri/Cargo.toml real_connector -- --ignored` | 真实 MCP 发现、错误凭据、任务查询错误及后续调用检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_execution::tests::saved_task_handles` | 实际 SQLite 重新打开后保留任务编号、原始响应及 metadata，输入校验、逐题答复和取消状态检查通过 |
@@ -169,11 +171,21 @@ sandbox-exec -p '(version 1) (allow default) (deny file-read* (subpath "/Users/m
 
 ## 当前安装包
 
-MCP 协议调整后，重新执行完整安装包构建，发布编译耗时 1 分 49 秒，命令退出码为 0。版本为 `0.1.0`，平台地址为隔离测试平台 `http://127.0.0.1:18082`，目标为 macOS ARM64，最低系统版本声明为 11.0，使用 ad-hoc 签名。
+MCP 协议调整和取消正文恢复均已包含在当前安装包中，发布编译耗时 2 分 19 秒，命令退出码为 0。版本为 `0.1.0`，平台地址为隔离测试平台 `http://127.0.0.1:18082`，目标为 macOS ARM64，最低系统版本声明为 11.0，使用 ad-hoc 签名。
 
-DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `1d6cdf286f2a4e3d70eb5b1ffe1a2a69a13938913deb7caea61d7a9aa7564124`。应用和随包 FFmpeg 的严格签名检查、DMG 全部校验和、复制后应用的严格签名检查均通过。
+DMG 位于 `artifacts/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `aaf680591afd264d7ce2ab89b23fa9c874a6bb89fee9018d5337cc7d893d6fd8`，主程序 SHA-256 为 `f9d59aa4df179104d82b277d61e03b65b84545b75e8bc9b4196f4e9e91a4243a`。应用和随包 FFmpeg 的严格签名检查、保存后的 DMG 全部校验和均通过。取消正文恢复的真实模型检查通过，当前安装包中的对应页面操作仍待验证。
 
-镜像内应用已复制到 `.local-cache/bundle-mcp-20261022/installed/Pixoma Studio.app`，复制后的主程序 SHA-256 为 `a19848c51ee48eb13c35ca0e47d13d1207d45e84ad80fbe34b745bc29a39d655`，与构建产物一致。镜像包含 `/Applications` 链接，应用包含 FFmpeg 程序、许可证、源码与构建参数；挂载的镜像已经正常退出。该复制出的应用使用原测试数据目录启动，恢复原账号、项目、会话、文档第二版本和引用记录，页面验收按清单记录状态。
+此前 MCP 安装副本已验证账号、项目、会话、文档第二版本和引用记录恢复，页面验收按清单记录状态。测试完成后清理编译缓存、测试安装副本、独立测试数据及测试服务环境；本节以外的测试路径仅记录当时操作。当前仅保留 `artifacts/` 中的一份安装包。
+
+## 安装包项目与技能页面检查
+
+2026-10-22 直接运行当前 DMG 中的应用，指定 `.local-cache/ui-check/data` 为本轮独立测试目录。账号检查使用本机已有的 `bin/pixoma` 和隔离数据库，地址为 `http://127.0.0.1:18083`；平台注册接口和安装包内登录成功，登录时没有勾选保存登录状态。本轮没有重新编译桌面应用。
+
+页面创建项目 `页面验收项目`，随后重命名为 `项目重命名检查`；SQLite 中项目 `b5ac7fad-915c-4ad6-84ec-1ebf3631032d` 保存该名称。在该项目通过原生文件选择器导入当前 `README.md`，资产 `027e0f4b-c075-4604-90be-2b84b2e1a5d8` 的版本为 `e5e777fe-ecf8-4f01-9e72-4a59592b272d`。页面保存评分 4 和标签 `版本检查`，数据库中的项目引用、评分和标签一致。名称搜索 `不存在的验收文件` 返回 0 项，标签搜索 `版本检查` 返回该文档，共 1 项。
+
+从原生菜单打开技能管理，创建 `desktop-validation`，在编辑器保存 `SKILL.md` 和 `references/steps.md`，版本为 `1.0.0`。重新打开后，正文与附带文件内容完整；版本历史列出 `1.0.0`。修改技能说明后保存 `1.0.1`，页面列表显示新说明，SQLite 的两个版本分别保留各自说明和实际文件。历史版本选择、启停和 ZIP 导入仍待页面验证。
+
+页面操作工具随后连续返回 `Sky Computer Use native pipe startup failed`，剩余操作未记为通过。本轮应用及测试平台均已停止，DMG 已退出挂载，独立测试数据及本轮下载的测试依赖已清理。
 
 ## 安装包资产页面检查
 

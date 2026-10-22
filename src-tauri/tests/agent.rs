@@ -13,6 +13,152 @@ impl Drop for TestCredential {
 }
 
 #[tokio::test]
+#[ignore = "需要 PIXOMA_TEST_MODEL_CONFIG 并连接真实模型服务"]
+async fn real_cancelled_text_remains_in_the_reopened_session_transcript()
+-> Result<(), Box<dyn std::error::Error>> {
+    let mut configuration: serde_json::Value =
+        serde_json::from_str(&std::env::var("PIXOMA_TEST_MODEL_CONFIG")?)?;
+    configuration["capabilities"]["tools"] = json!(false);
+    configuration["capabilities"]["streaming"] = json!(true);
+    configuration["thinking"] = json!({ "enabled": false });
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.local-cache");
+    std::fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new()
+        .prefix("cancelled-transcript-")
+        .tempdir_in(root)?;
+    let database = directory.path().join("studio.sqlite");
+    let mut store = Store::open(&database).await?;
+    let account = "cancelled-transcript-check";
+    let model = LocalApi::new(store.clone())
+        .request(
+            account,
+            LocalRequest {
+                method: "POST".to_owned(),
+                path: "/api/v1/studio-operations/models".to_owned(),
+                body: Some(configuration),
+            },
+        )
+        .await?;
+    let model = model["id"].as_str().ok_or("模型标识缺失")?;
+    let connection = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display())).await?;
+    let reference: String =
+        sqlx::query_scalar("SELECT credential_ref FROM model_configs WHERE account_id=? AND id=?")
+            .bind(account)
+            .bind(model)
+            .fetch_one(&connection)
+            .await?;
+    let _credential = TestCredential(keyring::Entry::new("com.pixoma.studio", &reference)?);
+    connection.close().await;
+    let session = store
+        .create_session(account, "cancelled-transcript")
+        .await?;
+    let queued = store
+        .queue_run(
+            account,
+            &session.id,
+            "cancelled-transcript",
+            model,
+            "请直接回复约800字的水循环科普说明。",
+            "auto_approve",
+        )
+        .await?;
+    let run = queued["run"]["id"]
+        .as_str()
+        .ok_or("运行标识缺失")?
+        .to_owned();
+    let runtime = AgentRuntime::new(store.clone());
+    let worker_runtime = runtime.clone();
+    let worker_run = run.clone();
+    let worker = tokio::spawn(async move { worker_runtime.execute(account, &worker_run).await });
+    tokio::time::timeout(std::time::Duration::from_secs(60), async {
+        loop {
+            let events = store.run_events_after(account, &run, 0).await?;
+            if events.iter().any(|event| {
+                event["type"] == "TEXT_MESSAGE_CONTENT"
+                    && event["payload"]["delta"]
+                        .as_str()
+                        .is_some_and(|text| !text.is_empty())
+            }) {
+                return Ok::<_, pixoma_studio::Error>(());
+            }
+            if worker.is_finished() {
+                return Err(pixoma_studio::Error::State("模型请求在收到正文之前结束"));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await??;
+    runtime.cancel(account, &run).await?;
+    assert_eq!(worker.await??["status"], "cancelled");
+    let expected: String = store
+        .run_events_after(account, &run, 0)
+        .await?
+        .iter()
+        .filter(|event| event["type"] == "TEXT_MESSAGE_CONTENT")
+        .filter_map(|event| event["payload"]["delta"].as_str())
+        .collect();
+    assert!(!expected.is_empty());
+    drop(runtime);
+    store.close().await;
+    store = Store::open(&database).await?;
+    assert_eq!(store.recover_interrupted_runs().await?, 0);
+    let detail = store.session_detail(account, &session.id).await?;
+    let messages = detail["transcript"]["messages"]
+        .as_array()
+        .ok_or("会话消息缺失")?;
+    let replies: Vec<_> = messages
+        .iter()
+        .filter(|message| message["runId"] == run && message["role"] == "assistant")
+        .collect();
+    assert_eq!(replies.len(), 1, "取消的实际正文没有保留在会话消息中");
+    assert_eq!(replies[0]["content"], expected);
+    assert!(
+        store
+            .session_detail("another-account", &session.id)
+            .await
+            .is_err()
+    );
+    let next = store
+        .queue_run(
+            account,
+            &session.id,
+            "after-cancelled-transcript",
+            model,
+            "请只回复：继续检查完成。",
+            "auto_approve",
+        )
+        .await?;
+    let next = next["run"]["id"].as_str().ok_or("后续运行标识缺失")?;
+    assert_eq!(
+        AgentRuntime::new(store.clone())
+            .execute(account, next)
+            .await?["status"],
+        "succeeded"
+    );
+    let detail = store.session_detail(account, &session.id).await?;
+    let messages = detail["transcript"]["messages"]
+        .as_array()
+        .ok_or("会话消息缺失")?;
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["runId"] == next && message["role"] == "assistant")
+            .count(),
+        1,
+        "完整回复重复展示了流式事件中的正文"
+    );
+    assert_eq!(
+        messages
+            .iter()
+            .filter(|message| message["runId"] == run && message["role"] == "assistant")
+            .count(),
+        1
+    );
+    store.close().await;
+    Ok(())
+}
+
+#[tokio::test]
 #[ignore = "需要 PIXOMA_TEST_MODEL_CONFIG 并连接支持图片的真实模型服务"]
 async fn real_model_reads_image_pixels_with_a_budget_based_on_dimensions()
 -> Result<(), Box<dyn std::error::Error>> {

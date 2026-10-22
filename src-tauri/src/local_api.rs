@@ -623,8 +623,57 @@ impl Store {
                     .await?;
             }
         }
-        let messages = self.session_documents("messages", account, id).await?;
+        let mut messages = self.session_documents("messages", account, id).await?;
         let events = self.session_documents("run_events", account, id).await?;
+        let runs = self.session_documents("runs", account, id).await?;
+        let interrupted: HashMap<&str, &Value> = runs
+            .iter()
+            .filter(|run| matches!(run["status"].as_str(), Some("failed" | "cancelled")))
+            .map(|run| Ok((text(run, "id")?, run)))
+            .collect::<Result<_>>()?;
+        let mut ordered_events: Vec<_> = events.iter().collect();
+        ordered_events.sort_by_key(|event| (event["run_id"].as_str(), event["sequence"].as_i64()));
+        for event in ordered_events {
+            if event["type"] != "TEXT_MESSAGE_CONTENT" {
+                continue;
+            }
+            let run = text(event, "run_id")?;
+            if !interrupted.contains_key(run) {
+                continue;
+            }
+            let message_id = text(&event["payload"], "messageId")?;
+            let delta = text(&event["payload"], "delta")?;
+            let complete = messages.iter().any(|message| {
+                message["run_id"] == run
+                    && message["role"] == "assistant"
+                    && message["id"]
+                        .as_str()
+                        .is_some_and(|id| message_id.starts_with(&format!("{id}-")))
+            });
+            if complete || delta.is_empty() {
+                continue;
+            }
+            if let Some(message) = messages
+                .iter_mut()
+                .find(|message| message["id"] == message_id)
+            {
+                let mut content = text(&message["content"][0], "text")?.to_owned();
+                content.push_str(delta);
+                message["content"][0]["text"] = json!(content);
+            } else {
+                messages.push(json!({
+                    "id": message_id, "run_id": run, "session_id": id,
+                    "role": "assistant", "content": [{ "type": "text", "text": delta }],
+                    "created_at": text(event, "created_at")?,
+                }));
+            }
+        }
+        messages.sort_by(|left, right| {
+            left["created_at"]
+                .as_str()
+                .cmp(&right["created_at"].as_str())
+                .then_with(|| left["id"].as_str().cmp(&right["id"].as_str()))
+        });
         let transcript_messages: Vec<Value> = messages.iter().map(|message| json!({
             "id": message["id"], "runId": message["run_id"], "role": message["role"],
             "content": message["content"].as_array().map(|parts| parts.iter().filter_map(|part| part["text"].as_str()).collect::<Vec<_>>().join("\n")).unwrap_or_default(),
@@ -638,7 +687,6 @@ impl Store {
             "type": event["type"], "payload": event["payload"], "createdAt": event["created_at"],
         })).collect();
         let mut session = serde_json::to_value(session)?;
-        let runs = self.session_documents("runs", account, id).await?;
         session["latest_run"] = runs.last().cloned().unwrap_or(Value::Null);
         Ok(json!({
             "session": session, "messages": messages, "transcript": { "messages": transcript_messages, "events": transcript_events },

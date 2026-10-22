@@ -49,6 +49,8 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
 需要真实平台、模型或计算节点的检查使用 `#[ignore]` 标记，按对应检查声明配置环境变量后单独执行。检查使用真实服务、SQLite、系统凭据与资产文件。结果和验证范围见 [验证记录](docs/verification.md)。
 
+每轮测试完成后，停止本轮启动的服务，清理编译缓存、测试安装副本、独立测试数据和下载的测试环境。需要保留的安装包统一存放在 `artifacts/`，仅保留最新一份；使用 `cargo clean --manifest-path src-tauri/Cargo.toml` 清理 Rust 构建产物。源码、验证记录、正式应用数据和随包资源继续保留。
+
 ## 构建安装包
 
 将 `平台地址` 替换为安装包要连接的平台地址：
