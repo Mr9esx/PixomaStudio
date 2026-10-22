@@ -7,6 +7,7 @@ use crate::{
 use rmcp::{
     ServiceExt,
     model::Tool,
+    service::{ClientLifecycleMode, ClientServiceExt},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
@@ -292,7 +293,7 @@ async fn connect_service(
     if !credential.is_empty() {
         config = config.auth_header(credential);
     }
-    let transport = StreamableHttpClientTransport::with_client(http, config);
+    let transport = || StreamableHttpClientTransport::with_client(http.clone(), config.clone());
     let mut client = rmcp::model::ClientConfig::default();
     client
         .capabilities
@@ -311,17 +312,58 @@ async fn connect_service(
                 .with_url(rmcp::model::UrlElicitationCapability::new()),
         );
     }
-    tokio::time::timeout(
-        Duration::from_secs(30),
+    tokio::time::timeout(Duration::from_secs(30), async {
+        let discovered = McpClient {
+            info: client.clone(),
+            context: context.clone(),
+        }
+        .serve_with_lifecycle(
+            transport(),
+            ClientLifecycleMode::Discover {
+                preferred_versions: rmcp::model::ProtocolVersion::KNOWN_VERSIONS
+                    .iter()
+                    .rev()
+                    .cloned()
+                    .collect(),
+            },
+        )
+        .await;
+        client.protocol_version = match discovered {
+            Ok(service) => {
+                let info = service
+                    .peer_info()
+                    .ok_or(Error::State("MCP 服务信息缺失"))?;
+                if !info.protocol_version.has_initialize() {
+                    return Ok(service);
+                }
+                let version = info.protocol_version.clone();
+                service
+                    .cancel()
+                    .await
+                    .map_err(|error| Error::Mcp(error.to_string()))?;
+                version
+            }
+            Err(rmcp::service::ClientInitializeError::JsonRpcError(error))
+                if matches!(
+                    error.code,
+                    rmcp::model::ErrorCode::METHOD_NOT_FOUND
+                        | rmcp::model::ErrorCode::INVALID_REQUEST
+                ) =>
+            {
+                rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE
+            }
+            Err(error) => return Err(Error::Mcp(error.to_string())),
+        };
         McpClient {
             info: client,
             context,
         }
-        .serve(transport),
-    )
+        .serve(transport())
+        .await
+        .map_err(|error| Error::Mcp(error.to_string()))
+    })
     .await
     .map_err(|_| Error::Mcp("服务初始化超时".to_owned()))?
-    .map_err(|error| Error::Mcp(error.to_string()))
 }
 
 async fn discover_tools(address: &str, credential: &str) -> Result<Vec<Tool>> {

@@ -1,6 +1,6 @@
 # 开发验证记录
 
-日期：2026-10-21。
+日期：2026-10-22。
 
 工程目录：`/Users/mr9esx/Documents/PixomaStudio`。
 
@@ -22,7 +22,7 @@
 - 模型保存、运行配置保存和会话清理共用并发保护；真实凭据检查覆盖并发密钥更新、保留密钥的配置更新，以及排队运行使用的密钥。清空会话同时清理普通运行和官方专家会话保留的旧凭据，当前模型凭据继续保留。
 - 排队运行、普通模型请求和上下文压缩请求检查当前模型的启停与 Agent 权限；停用后不建立新的请求记录。
 - Rig 的 Responses、Chat Completions 和 Anthropic Messages 均通过真实模型的连续对话、工具创建、审批恢复、指定版本资料读取和上下文压缩检查。
-- rmcp 承担 MCP 初始化与工具发现；关闭会话失效后的请求重发。
+- rmcp 承担 MCP 协议协商、初始化与工具发现；2026 协议通过逐次请求的 metadata 传递客户端能力，2025 协议通过 initialize 建立会话。关闭会话失效后的请求重发。
 - Agent 可以通过实际工具列出会话资产、读取文本、创建文档和保存文档新版本；参数使用 JSON Schema 校验。
 - 工具定义、调用、参数、审批和结果保存到 SQLite；工具结果与对应 AG-UI 事件使用同一个事务。
 - 真实模型生成的文档调用在实际文件创建后、结果保存前中断，重新打开数据库后保存为 `tool_result_unknown`；自动恢复与直接重复调用均不再次执行，实际文件、资产和版本保持一份。未知工具名称被拒绝。
@@ -84,7 +84,7 @@
 | `pnpm test` | 5 项通过 |
 | `pnpm build` | 通过，包含构建文件大小提示 |
 | `cargo check --manifest-path src-tauri/Cargo.toml --all-targets` | 通过 |
-| `cargo test --manifest-path src-tauri/Cargo.toml` | 55 项通过，22 项真实服务检查单独执行 |
+| `cargo test --manifest-path src-tauri/Cargo.toml` | 55 项通过，23 项真实服务检查单独执行 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration platform:: -- --ignored` | 真实账号流程与官方技能保存通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration agent::real_model_streams_text -- --ignored` | 三种协议均通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration agent::real_model_creates_a_document -- --ignored` | 三种协议均通过 |
@@ -99,9 +99,10 @@
 | `cargo test --manifest-path src-tauri/Cargo.toml real_connector -- --ignored` | 真实 MCP 发现、错误凭据、任务查询错误及后续调用检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_execution::tests::saved_task_handles` | 实际 SQLite 重新打开后保留任务编号、原始响应及 metadata，输入校验、逐题答复和取消状态检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_execution::tests::real_sdk_task -- --ignored` | 官方 SDK TaskDemo 实际计算 `17 + 23`，本地等待中断、数据库重新打开后继续查询原任务编号并取得 `40` |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_execution::tests::real_sdk_mrtr -- --ignored` | 官方 TypeScript SDK todos 服务实际创建和完成待办；取消、拒绝和选择否保留记录，确认后删除记录。等待输入、保存答复和准备继续的三个阶段重新打开数据库，原工具继续并返回实际业务结果 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_inputs::tests::form_answers` | 实际 SQLite 检查覆盖 MRTR 原始状态、字段 Schema 校验、账号范围、并发重复答复、恢复参数及实时输入中断后的未知结果状态 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp::tests::cancelled_elicitation` | 实际 SQLite 与 CancellationToken 检查覆盖当前输入取消、排队输入取消、门禁隔离、关闭问题及继续事件。服务撤销输入后的完整工具响应保存由 `form_answers` 检查覆盖 |
-| `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_inputs::tests::real_sdk_enum_form -- --ignored` | 连接官方 SDK enum form 服务，实际等待 301 秒后连续提交四项输入，服务返回更新后的选项；Channel 中断事件和数据库重新打开检查通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --lib mcp_inputs::tests::real_sdk_enum_form -- --ignored` | 连接官方 rmcp 1.5.0 enum form 服务，实际等待 301 秒后连续提交四项输入，服务返回更新后的选项；Channel 中断事件和数据库重新打开检查通过。App 的 rmcp 保持 3.5.1 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib tools::tests::real_tool_result -- --ignored` | 真实模型、实际文件与数据库中断恢复检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration skills::` | 2 项实际 SQLite 与 ZIP 检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration skills::real_model -- --ignored` | Chat 协议真实文件读取、版本绑定与恢复检查通过 |
@@ -127,12 +128,12 @@
 | `cargo run --manifest-path src-tauri/Cargo.toml --example native_journey` | 真实原生窗口 IPC、模型、Channel、AG-UI、文档资源、工作流输入等待与跳过、账号切换、清空会话与退出检查通过。原有前端 API 的个人技能和专家发布、重复请求与撤销发布通过；真实资料压缩与摘要复用、收到正文后取消，以及取消和输出限制后的连续对话通过 |
 | `cargo run --manifest-path src-tauri/Cargo.toml --example native_recovery` | 顺序启动创建和恢复两个 App 阶段。恢复阶段移除平台地址、账号密码和模型配置环境变量，读取保存的登录、项目、原始资料和资料摘要，继续原审批运行。未批准时没有文档，批准后只有一份，重复批准不重复执行；最后退出登录。父进程同时核对本次启动编号、阶段和成功结果；实际占用应用目录锁后启动的子进程不能形成成功结果，其他启动编号不能使用已有结果 |
 | `cargo run --manifest-path src-tauri/Cargo.toml --example native_platform_config` | 两次原生启动均读取真实平台，第二次启动只使用保存的配置 |
-| `CI=true PIXOMA_PLATFORM_URL=http://127.0.0.1:18082 pnpm tauri build --ci` | 完整构建通过，生成 77.18 MiB 的 `.app` 和 37.31 MiB 的 `.dmg`，使用 ad-hoc 签名 |
+| `CI=true PIXOMA_PLATFORM_URL=http://127.0.0.1:18082 pnpm tauri build --ci` | 完整构建通过，生成 77.50 MiB 的 `.app` 和 37.46 MiB 的 `.dmg`，使用 ad-hoc 签名 |
 | `codesign --verify --deep --strict` | 最新应用、随包 FFmpeg 及 DMG 镜像内的应用均通过签名完整性检查 |
 | `hdiutil verify` | 最新 DMG 的全部校验和通过 |
 | 原工程目录访问限制 | 使用 `sandbox-exec` 禁止读取 `/Users/mr9esx/Documents/Pixoma`，读取原工程 `AGENTS.md` 的校准检查返回 `Operation not permitted`。在相同限制下，`pnpm install --frozen-lockfile`、FFmpeg 准备和 `CI=true pnpm tauri build --ci` 全部通过，构建包含前端、类型、Rust、应用签名与 DMG 生成。检查使用本机已有依赖缓存 |
 | 源码符号链接 | `src/`、`public/`、`scripts/`、Rust 源码、测试、示例和数据库迁移目录均没有符号链接 |
-| 安装包实际页面 | 从 DMG 复制应用并指定独立数据目录，没有平台地址环境变量时读取并保存构建地址；登录、项目、文档、图片和视频导入、图片预览、视频播放、单项及 ZIP 导出通过。最新安装副本恢复登录凭据等待系统钥匙串授权；模型回复尚未取得成功证据 |
+| 安装包实际页面 | 从 DMG 复制应用并指定独立数据目录，没有平台地址环境变量时读取并保存构建地址；登录、项目、文档、图片和视频导入、图片预览、视频播放、单项及 ZIP 导出通过。`bundle-final.CFap2e` 副本的登录恢复、模型选择、连续对话、工具批准与拒绝、正文生成后取消、取消后继续、第二版本文档引用和实际用量读取通过 |
 | 平台 `pnpm test src/config/menu.test.ts` | 5 项通过 |
 | 平台 `pnpm exec vitest run --config vite.config.ts src/context/search-provider.test.tsx --browser.headless` | 7 项通过，关闭失败截图 |
 
@@ -168,11 +169,11 @@ sandbox-exec -p '(version 1) (allow default) (deny file-read* (subpath "/Users/m
 
 ## 当前安装包
 
-全部 Rust 文件整理完成后，重新执行完整安装包构建，发布编译耗时 1 分 37 秒，命令退出码为 0。版本为 `0.1.0`，平台地址为隔离测试平台 `http://127.0.0.1:18082`，目标为 macOS ARM64，最低系统版本声明为 11.0，使用 ad-hoc 签名。
+MCP 协议调整后，重新执行完整安装包构建，发布编译耗时 1 分 49 秒，命令退出码为 0。版本为 `0.1.0`，平台地址为隔离测试平台 `http://127.0.0.1:18082`，目标为 macOS ARM64，最低系统版本声明为 11.0，使用 ad-hoc 签名。
 
-DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `7da62a9a8b3c10c193250bae20e68968857803b5a38b87e1128e5f92e939a8b0`。应用和随包 FFmpeg 的严格签名检查、DMG 全部校验和、镜像内应用的严格签名检查均通过。
+DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `1d6cdf286f2a4e3d70eb5b1ffe1a2a69a13938913deb7caea61d7a9aa7564124`。应用和随包 FFmpeg 的严格签名检查、DMG 全部校验和、复制后应用的严格签名检查均通过。
 
-镜像内应用已复制到 `.local-cache/bundle-final.CFap2e/installed/Pixoma Studio.app`，复制后的应用签名和主程序 SHA-256 与构建产物一致。镜像包含 `/Applications` 链接，应用包含 FFmpeg 程序、许可证、源码与构建参数；挂载的镜像已经正常退出。该复制出的应用已使用原测试数据目录启动，恢复登录凭据时等待系统钥匙串授权，页面验收按清单记录状态。
+镜像内应用已复制到 `.local-cache/bundle-mcp-20261022/installed/Pixoma Studio.app`，复制后的主程序 SHA-256 为 `a19848c51ee48eb13c35ca0e47d13d1207d45e84ad80fbe34b745bc29a39d655`，与构建产物一致。镜像包含 `/Applications` 链接，应用包含 FFmpeg 程序、许可证、源码与构建参数；挂载的镜像已经正常退出。该复制出的应用使用原测试数据目录启动，恢复原账号、项目、会话、文档第二版本和引用记录，页面验收按清单记录状态。
 
 ## 安装包资产页面检查
 
@@ -184,7 +185,25 @@ DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`
 
 单项导出通过原生保存对话框选择 `.local-cache/bundle-ui-20261021`，生成 `安装包文稿检查.md`；再次导出后取消保存，正常返回原详情。实际导出文件与原资产内容通过 `cmp` 比较一致。批量选择文档和视频后导出 `assets.zip`，标准库 `zipfile` 读取中文文件名并解压成功；其中 `001-red.mp4` 与 `002-安装包文稿检查.md` 分别与原视频、单项导出文档通过 `cmp` 比较一致。
 
-页面操作结束后，通过应用退出操作正常结束原安装副本，退出码为 0。随后启动最新安装副本，实际打开同一数据库；进程采样显示恢复平台登录凭据时等待系统钥匙串授权。当前请求未自动处理系统授权窗口，完整恢复继续保留待验证。
+页面操作结束后，通过应用退出操作正常结束原安装副本，退出码为 0。随后启动 `bundle-final.CFap2e` 安装副本，实际打开同一数据库；完成系统钥匙串授权后恢复账号与原项目。
+
+## 安装包对话页面检查
+
+2026-10-22 使用 `.local-cache/bundle-final.CFap2e/installed/Pixoma Studio.app` 和原独立数据目录完成检查。专用测试 MCP 凭据已经到期，发现工具显示实际 HTTP 401 错误；通过原生菜单进入 MCP 设置并停用该测试连接后，继续验证独立模型对话。MCP 协议调整后的安装包另行验证。
+
+会话 `04065ff0-058c-42e1-bbce-c41536faf86d` 的两次真实模型回复均为 `PX62250`，第二次请求读取第一次消息。轨迹页面显示两个实际模型请求；上下文页面显示历史消息、工具定义、实际输入、缓存读取、输出 Token 与时间记录。
+
+拒绝工具审批后，运行保存为 `cancelled`。随后批准 `create_text_asset`，创建文档 `模型审批检查.md`，资产编号为 `839d7b42-dae6-4430-b4ef-84e1446a4cd6`，第一版本为 `1a9cba9e-e56e-46b6-9957-6964b64f95f0`。编辑表单保存第二版本 `1c0b13f4-b834-4235-82a9-3317573fccb5`，详情页显示第二版本正文。选择该版本作为消息资料，真实模型逐字返回第二版本正文。
+
+科普说明已经开始显示正文后点击停止，运行 `568ee6ef-93cb-4ebf-91f2-ead2c24b3440` 保存为 `cancelled`；随后继续询问资料中的编号，模型回复 `PX62251`。原消息和文档引用继续保留。
+
+## MRTR 真实业务检查
+
+服务使用官方 TypeScript SDK commit `c05225a636c679870b65f8ca4fe83a76ea1cf113` 的 `examples/todos-server`，源码保持原样。安装锁定依赖并构建服务包后，使用 `PORT=18202 pnpm --filter @mcp-examples/todos-server start:http` 启动，只监听 `127.0.0.1`。
+
+检查通过 `PIXOMA_TEST_MRTR_MCP_URL` 连接真实服务，使用 `PIXOMA_TEST_MODEL_CONFIG` 保存本机真实模型的公开配置；本项只执行 MCP 工具，不发送模型请求。工具名称和定义来自实际发现结果。服务看板为空时创建随机标题的待办并标记完成，依次执行取消、拒绝、选择否和确认。每次答复后调用 `list_tasks` 检查实际看板；前三次保留原编号和完成状态，确认后看板为空。四次流程均在等待、答复保存和准备继续时关闭并重新打开 SQLite，工具结果和记录状态一致。
+
+旧版实时输入使用官方 Rust SDK `rmcp-v1.5.0` 的 enum 示例，commit 为 `020a38b6ad3d0f26487c464250a484fad2a06b0e`，示例源码保持原样，服务依赖 `rmcp` 和 `rmcp-macros` 均固定为 1.5.0。App 继续使用 rmcp 3.5.1，协商后建立旧版会话。设置 `PIXOMA_TEST_ELICIT_WAIT_SECONDS=301`，实际等待后提交四项选项，服务保存更新后的内容；完整检查耗时 301.28 秒，退出码为 0。
 
 ## 本地 Git 仓库
 
@@ -193,9 +212,9 @@ DMG 位于 `src-tauri/target/release/bundle/dmg/Pixoma Studio_0.1.0_aarch64.dmg`
 ## 待完成的验证
 
 - [前端与安装包验收清单](frontend-checklist.md)记录页面操作、已有接口证据与安装包交互状态；Studio 共同业务文件的差异已逐项核查。
-- MRTR 与 Task 补充输入已有实际 SQLite 状态检查，尚未获得对应真实服务的输入往返证据；实时输入和异步 TaskDemo 任务已经通过官方 SDK 服务检查。
+- MRTR 补充输入的真实答复、业务状态和恢复检查已经通过；Task 补充输入已有实际 SQLite 状态检查，仍需对应真实服务的输入往返证据。实时输入和异步 TaskDemo 任务已有官方 SDK 服务检查。
 - 页面中的完整操作需要在业务接口齐全后继续验证。
 - 技能目录与正文分页、官方专家、专家步骤、卡片和个人发布同步已有真实检查；发布操作的完整页面交互仍需验收，原有前端 API 与真实原生 Commands 的往返检查已经通过。
 - 图片引用在原生页面中的完整选择、发送与历史读取操作仍需交互验收。
 - 文件保存对话框、单项及 ZIP 导出、图片预览和视频播放已完成本轮检查；音频预览与视频时间定位仍需桌面交互验收。
-- 安装包完整运行仍待完成。安装包已经生成并通过签名完整性和 DMG 校验和检查；最新安装副本的登录恢复与模型调用需要完成 macOS 钥匙串授权后继续验证。
+- 安装包完整运行仍待完成。`bundle-final.CFap2e` 副本的登录恢复与真实模型调用已通过，其他页面及 MCP 协议调整后的安装包按清单继续验证。

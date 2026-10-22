@@ -752,7 +752,8 @@ mod tests {
                         }
                     }
                     if worker.is_finished() {
-                        return Err(crate::Error::State("MCP 调用提前结束"));
+                        let records = store.tool_call_records(account, &run, 1).await?;
+                        return Err(crate::Error::Mcp(format!("MCP 调用提前结束：{records:?}")));
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
                 }

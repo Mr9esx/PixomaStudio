@@ -398,6 +398,205 @@ mod tests {
     use sqlx::Row;
 
     #[tokio::test]
+    #[ignore = "需要 PIXOMA_TEST_MRTR_MCP_URL、PIXOMA_TEST_MODEL_CONFIG 和官方 SDK todos 服务"]
+    async fn real_sdk_mrtr_preserves_answers_and_board_changes_after_reopening()
+    -> std::result::Result<(), Box<dyn std::error::Error>> {
+        let root = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.local-cache");
+        std::fs::create_dir_all(&root)?;
+        let directory = tempfile::Builder::new()
+            .prefix("mcp-mrtr-live-")
+            .tempdir_in(root)?;
+        let database = directory.path().join("studio.sqlite");
+        let mut store = Store::open(&database).await?;
+        let account = "mcp-mrtr-live";
+        let model = store
+            .save_model(
+                account,
+                None,
+                serde_json::from_str(&std::env::var("PIXOMA_TEST_MODEL_CONFIG")?)?,
+            )
+            .await?;
+        store
+            .save_connector(
+                account,
+                None,
+                json!({
+                    "name": "官方 SDK 待办服务", "url": std::env::var("PIXOMA_TEST_MRTR_MCP_URL")?,
+                    "credential": "", "enabled": true, "policy": "auto",
+                }),
+            )
+            .await?;
+        let tools = store.mcp_run_tools(account).await?;
+        let find_tool = |name: &str| {
+            tools
+                .iter()
+                .find(|tool| tool.display_name() == name)
+                .cloned()
+                .ok_or("待办工具缺失")
+        };
+        let list = find_tool("list_tasks")?;
+        let add = find_tool("add_task")?;
+        let complete = find_tool("complete_task")?;
+        let clear = find_tool("clear_done")?;
+        let before = store
+            .call_mcp_tool(
+                account,
+                &list,
+                json!({ "status": "all" }).as_object().unwrap(),
+            )
+            .await?;
+        assert_eq!(before["content"][0]["text"], "No matching tasks.");
+        let title = format!("MRTR-{}", uuid::Uuid::new_v4());
+        let added = store
+            .call_mcp_tool(
+                account,
+                &add,
+                json!({ "title": title, "project": account })
+                    .as_object()
+                    .unwrap(),
+            )
+            .await?;
+        let task_id = text(&added["structuredContent"], "id")?.to_owned();
+        store
+            .call_mcp_tool(
+                account,
+                &complete,
+                json!({ "task": task_id }).as_object().unwrap(),
+            )
+            .await?;
+        for (selected, action, deleted) in [
+            (None, "cancel", false),
+            (Some("skip"), "decline", false),
+            (Some("value-1"), "accept", false),
+            (Some("value-0"), "accept", true),
+        ] {
+            let request = format!("mrtr-{action}-{deleted}");
+            let session = store.create_session(account, &request).await?;
+            let queued = store
+                .queue_run(
+                    account,
+                    &session.id,
+                    &request,
+                    text(&model, "id")?,
+                    "检查待办确认",
+                    "full_access",
+                )
+                .await?;
+            let run = text(&queued["run"], "id")?.to_owned();
+            assert!(store.claim_run(account, &run).await?);
+            let call = ToolCall::from_wire(
+                format!("mrtr-{action}-{deleted}"),
+                ToolFunction::new(clear.definition.name.clone(), json!({})),
+            );
+            store.save_tool_part(account, &run, 1, 0, &call).await?;
+            let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+            let id = text(&record, "id")?.to_owned();
+            assert!(
+                store
+                    .execute_local_tool(account, &run, &record, &clear, &call)
+                    .await?
+                    .is_none()
+            );
+            let saved = store
+                .mcp_execution(account, &run, &id, &clear, &call)
+                .await?
+                .ok_or("MRTR 输入记录缺失")?;
+            assert_eq!(saved["input"]["source"], "mrtr");
+            assert!(saved["input"]["requests"]["confirmation"].is_object());
+            store.close().await;
+            store = Store::open(&database).await?;
+            assert_eq!(store.recover_interrupted_runs().await?, 0);
+            assert_eq!(
+                store.get_run(account, &run).await?["status"],
+                "waiting_clarification"
+            );
+            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
+                .bind(account).bind(&run).fetch_one(&store.pool).await?;
+            let pending: serde_json::Value = serde_json::from_str(&pending)?;
+            let answer = match selected {
+                Some(selected) => json!({
+                    "interruptId": pending["id"], "status": "resolved",
+                    "payload": { "selected": selected },
+                }),
+                None => json!({ "interruptId": pending["id"], "status": "cancelled" }),
+            };
+            store
+                .resolve_run_interrupt(account, &session.id, &answer)
+                .await?;
+            store.close().await;
+            store = Store::open(&database).await?;
+            assert_eq!(store.recover_interrupted_runs().await?, 0);
+            assert!(store.claim_run(account, &run).await?);
+            assert!(
+                !store
+                    .pause_for_mcp_input(account, &run, &id, &clear, &call)
+                    .await?
+            );
+            let saved = store
+                .mcp_execution(account, &run, &id, &clear, &call)
+                .await?
+                .ok_or("MRTR 答复记录缺失")?;
+            assert_eq!(saved["status"], "ready");
+            assert_eq!(
+                saved["input"]["responses"]["confirmation"]["action"],
+                action
+            );
+            if action == "accept" {
+                assert_eq!(
+                    saved["input"]["responses"]["confirmation"]["content"]["confirm"],
+                    deleted
+                );
+            }
+            store.close().await;
+            store = Store::open(&database).await?;
+            assert_eq!(store.recover_interrupted_runs().await?, 1);
+            assert!(store.claim_run(account, &run).await?);
+            let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+            let result = store
+                .execute_local_tool(account, &run, &record, &clear, &call)
+                .await?
+                .ok_or("MRTR 没有返回结果")?;
+            let rig::message::UserContent::ToolResult(result) = result else {
+                return Err("工具结果格式无效".into());
+            };
+            assert!(!result.is_error);
+            let saved = store
+                .mcp_execution(account, &run, &id, &clear, &call)
+                .await?
+                .ok_or("MRTR 结束记录缺失")?;
+            assert_eq!(saved["status"], "completed");
+            let expected = if deleted {
+                "Deleted 1 completed task(s).".to_owned()
+            } else {
+                format!("Nothing deleted (user answered: {action}).")
+            };
+            assert_eq!(saved["response"]["content"][0]["text"], expected);
+            let board = store
+                .call_mcp_tool(
+                    account,
+                    &list,
+                    json!({ "status": "all" }).as_object().unwrap(),
+                )
+                .await?;
+            let board = text(&board["content"][0], "text")?;
+            if deleted {
+                assert_eq!(board, "No matching tasks.");
+            } else {
+                assert!(board.contains(&title));
+                assert!(board.contains(&task_id));
+                assert!(board.contains("[x]"));
+            }
+            assert_eq!(
+                store.tool_call_records(account, &run, 1).await?[0]["status"],
+                "succeeded"
+            );
+            store.finish_run(account, &run, "succeeded", None).await?;
+        }
+        store.close().await;
+        Ok(())
+    }
+
+    #[tokio::test]
     #[ignore = "需要 PIXOMA_TEST_TASK_MCP_URL 并连接官方 SDK TaskDemo 服务"]
     async fn real_sdk_task_keeps_its_id_and_computed_sum_after_reopening()
     -> std::result::Result<(), Box<dyn std::error::Error>> {
