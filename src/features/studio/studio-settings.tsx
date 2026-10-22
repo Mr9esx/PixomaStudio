@@ -9,6 +9,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { ApiError } from '@/lib/api/client'
+import { invalidateStudioModels } from '@/lib/model-cache'
 import {
   createStudioModel,
   createStudioConnector,
@@ -975,7 +976,7 @@ function ModelDialog({
         : createStudioModel(input)
     },
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ['studio-operations', 'models'] })
+      await invalidateStudioModels(queryClient)
       onOpenChange(false)
       toast.success(model ? '模型已更新' : '模型已添加')
     },
