@@ -53,6 +53,8 @@ cargo fmt --manifest-path src-tauri/Cargo.toml --check
 
 ## 构建安装包
 
+当前交付的 macOS 安装包默认连接本机 Pixoma 平台 `http://127.0.0.1:30808`。
+
 将 `平台地址` 替换为安装包要连接的平台地址：
 
 ```sh
