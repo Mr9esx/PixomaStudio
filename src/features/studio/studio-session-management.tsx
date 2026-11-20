@@ -1,6 +1,5 @@
 import { useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
-import { MessageCircle } from 'lucide-react'
 import { useTranslation } from 'react-i18next'
 import { toast } from 'sonner'
 import { clearStudioSessions, listStudioSessions } from '@/lib/api/studio'
@@ -15,12 +14,6 @@ import {
   AlertDialogTrigger,
 } from '@/components/ui/alert-dialog'
 import { Button } from '@/components/ui/button'
-import {
-  Empty,
-  EmptyHeader,
-  EmptyMedia,
-  EmptyTitle,
-} from '@/components/ui/empty'
 import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
 import { Input } from '@/components/ui/input'
 import { ErrorBanner } from '@/components/feedback/error-banner'
@@ -72,12 +65,11 @@ export function StudioSessionManagement({
         }
       }}
     >
-      <section className='flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto px-5 pt-6 pb-5 sm:px-6 sm:pt-8 sm:pb-6'>
-        <div className='mx-auto flex w-full max-w-4xl flex-col gap-5'>
+      <section className='relative flex min-h-0 flex-1 flex-col gap-3 overflow-y-auto px-5 pt-3 pb-5'>
+        <div className='mx-auto flex w-full max-w-4xl flex-col gap-3'>
+          <h2 className='text-lg font-semibold'>通用</h2>
           <div className='flex flex-wrap items-center justify-between gap-3'>
-            <h2 className='text-lg font-semibold'>
-              {t('studioOperations.sessions')}
-            </h2>
+            <h3 className='text-sm font-medium'>对话数据</h3>
             <AlertDialogTrigger asChild>
               <Button
                 size='sm'
@@ -93,21 +85,12 @@ export function StudioSessionManagement({
             </AlertDialogTrigger>
           </div>
           {sessions.isPending ? (
-            <LoadingSkeleton rows={3} />
+            <LoadingSkeleton rows={1} />
           ) : sessions.isError ? (
             <ErrorBanner
               message={sessions.error.message}
               onRetry={() => void sessions.refetch()}
             />
-          ) : !sessions.data.length ? (
-            <Empty className='min-h-60'>
-              <EmptyHeader>
-                <EmptyMedia variant='icon'>
-                  <MessageCircle />
-                </EmptyMedia>
-                <EmptyTitle>{t('studioOperations.empty')}</EmptyTitle>
-              </EmptyHeader>
-            </Empty>
           ) : null}
         </div>
       </section>

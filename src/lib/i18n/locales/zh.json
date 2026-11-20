@@ -1,5 +1,6 @@
 {
   "agentAssets": {
+    "catalogTitle": "技能与专家",
     "source": "来源", "expertProgress": "专家执行步骤", "confirm": "确认", "reject": "拒绝", "submit": "提交", "cancelTest": "取消测试",
     "runStatuses": { "pending": "等待执行", "queued": "等待执行", "running": "执行中", "waiting_approval": "等待确认", "waiting_clarification": "等待填写输入", "waiting_workflow": "等待工作流", "succeeded": "已结束", "failed": "执行失败", "cancelled": "已取消" },
     "avatar": "头像", "uploadAvatar": "上传头像", "avatarFailed": "头像保存失败", "sop": "执行步骤",
@@ -18,13 +19,13 @@
     "skills": "技能",
     "mcp": "外部 MCP 服务",
     "settings": "设置",
-    "sessions": "会话管理",
-    "clear": "清空我的会话",
+    "sessions": "会话",
+    "clear": "清空全部对话",
     "clearing": "清空中…",
-    "cleared": "已清空我的会话",
+    "cleared": "已清空全部对话",
     "empty": "暂无会话",
     "confirmLabel": "输入「确认清空」",
-    "clearDescription": "当前账号的所有会话、消息和运行记录将被清空，正在运行的 Agent 将停止。资产库内容保留。此操作不可撤销。"
+    "clearDescription": "本机的全部对话、消息和运行记录将被清空，正在运行的 Agent 将停止。资产库内容保留。此操作不可撤销。"
   },
   "workflowMarket": {
     "title": "工作流市场",

@@ -12,6 +12,11 @@ export type StudioComposerValue = {
   selectedAssets: { assetId: string; assetVersionId: string }[]
 }
 
+export function newStudioAssetReferences(requested: StudioComposerValue['selectedAssets'], existing: StudioComposerValue['selectedAssets']) {
+  const seen = new Set(existing.map(asset => asset.assetId))
+  return requested.filter(asset => { if (seen.has(asset.assetId)) return false; seen.add(asset.assetId); return true })
+}
+
 export function studioComposerContent(parts: StudioComposerPart[]): JSONContent {
   const content: JSONContent[] = []
   for (const part of parts) {
@@ -70,7 +75,7 @@ export function serializeStudioComposer(content: JSONContent): StudioComposerVal
         parts.push({ type: 'skill_ref', skill_id: id, name: label, ...(capabilityVersion ? { version: capabilityVersion } : {}) })
         if (!selectedSkillIds.includes(id)) selectedSkillIds.push(id)
       } else if (kind === 'workflow') {
-        parts.push({ type: 'workflow_ref', workflow_id: id, name: label, ...(capabilityVersion ? { version_id: Number(capabilityVersion) } : {}) })
+        parts.push({ type: 'workflow_ref', workflow_id: id, name: label, ...(capabilityVersion ? { version_id: capabilityVersion } : {}) })
       } else if (kind === 'asset' && typeof versionId === 'string' && versionId) {
         parts.push({ type: 'asset_ref', asset_id: id, asset_version_id: versionId, name: label })
         if (!selectedAssets.some((asset) => asset.assetId === id)) {

@@ -1,6 +1,6 @@
 import { apiFetch, desktopInvoke, toQuery } from './client'
 import { createDesktopUpload } from '@/lib/desktop-upload'
-import type { MarketWorkflow } from './workflow-market'
+import { listWorkflowReferences, type WorkflowReference } from './workflows'
 
 export type StudioPermissionMode =
   | 'request_approval'
@@ -24,9 +24,12 @@ export type StudioSession = {
   updated_at: string
 }
 
+export type StudioProjectType = 'general' | 'video'
+
 export type StudioProject = {
   id: string
   name: string
+  project_type: StudioProjectType
   created_at: string
   updated_at: string
 }
@@ -58,7 +61,7 @@ export type StudioComposerPart =
       asset_version_id: string
       name: string
     }
-  | { type: 'workflow_ref'; workflow_id: string; name: string; version_id?: number }
+  | { type: 'workflow_ref'; workflow_id: string; name: string; version_id?: string }
 
 export type StudioTranscriptToolCall = {
   id: string
@@ -411,6 +414,7 @@ export type StudioProjectAsset = {
 export type StudioSessionAssetUsage = {
   id: string
   session_id: string
+  asset_version_id: string
   session_title_snapshot: string
   usage_kind: 'created' | 'uploaded' | 'referenced'
   run_id?: string
@@ -428,40 +432,16 @@ export type StudioLibraryPreferences = {
   last_project_id: string
 }
 
-export type StudioFlowNode = {
-  id: string
-  type: 'stage' | 'plan' | 'operation' | 'asset'
-  title: string
-  body?: string
-  asset_id?: string
-  asset_version_id?: string
-  asset_version?: number
-  run_id?: string
-  outputs?: Array<{ key: string; type: string; name: string; asset_id: string; asset_version_id: string }>
-  position: { x: number; y: number }
-  sort_order: number
-  updated_at: string
-}
-
-export type StudioFlowEdge = {
-  id: string
-  source: string
-  target: string
-  source_output_key?: string
-  target_input_key?: string
-  label?: string
-}
-
 export type StudioWorkflowExecution = {
   id: string
   run_id: string
-  task_id: string
+  execution_id?: string
   workflow_id: string
-  operation_node_id: string
+  workflow: { name: string }
   input_fields?: Array<{ key: string; type: string; description?: string; required?: boolean }>
   output_fields?: Array<{ key: string; type: string; description?: string; required?: boolean }>
   inputs?: Array<{ key: string; value?: string; asset_id?: string; asset_version_id?: string; asset_name?: string }>
-  status: 'submitted' | 'succeeded' | 'failed' | 'cancelled'
+  status: 'submitted' | 'succeeded' | 'failed' | 'cancelled' | 'result_unknown'
   task_status?:
     | 'pending'
     | 'queued'
@@ -508,10 +488,6 @@ export type StudioSessionDetail = {
   transcript: StudioTranscript
   workflow_executions?: StudioWorkflowExecution[]
   assets: StudioAsset[]
-  flow: {
-    nodes: StudioFlowNode[]
-    edges: StudioFlowEdge[]
-  }
 }
 
 export type StudioExpertResult = { message_ids?: string[]; assets?: { asset_id: string; asset_version_id: string }[]; workflow_execution_ids?: string[]; summary?: string }
@@ -619,7 +595,7 @@ export type StudioMCPConnector = {
   updated_at: string
 }
 
-export type StudioAgentWorkflow = MarketWorkflow
+export type StudioAgentWorkflow = WorkflowReference
 
 export function listStudioSessions(params?: {
   limit?: number
@@ -641,7 +617,9 @@ function studioProject(value: unknown): StudioProject {
     !('id' in value) ||
     typeof value.id !== 'string' ||
     !('name' in value) ||
-    typeof value.name !== 'string'
+    typeof value.name !== 'string' ||
+    !('project_type' in value) ||
+    (value.project_type !== 'general' && value.project_type !== 'video')
   ) {
     throw new Error('项目响应格式错误')
   }
@@ -654,20 +632,20 @@ export async function listStudioProjects() {
   return projects.map(studioProject)
 }
 
-export async function createStudioProject(name: string) {
+export async function createStudioProject(name: string, projectType: StudioProjectType = 'general') {
   const project = await apiFetch<unknown>('/api/v1/studio/projects', {
     method: 'POST',
-    body: JSON.stringify({ name }),
+    body: JSON.stringify({ name, project_type: projectType }),
   })
   return studioProject(project)
 }
 
-export async function renameStudioProject(id: string, name: string) {
+export async function updateStudioProject(id: string, name: string, projectType: StudioProjectType) {
   const project = await apiFetch<unknown>(
     `/api/v1/studio/projects/${encodeURIComponent(id)}`,
     {
       method: 'PATCH',
-      body: JSON.stringify({ name }),
+      body: JSON.stringify({ name, project_type: projectType }),
     }
   )
   return studioProject(project)
@@ -887,7 +865,7 @@ export async function uploadStudioAsset(
   requestId: string = crypto.randomUUID()
 ) {
   const upload = await createDesktopUpload(file, sessionId, projectId, requestId)
-  return desktopInvoke<StudioAsset & { project_asset_id: string }>('studio_upload', upload.bytes, {
+  return desktopInvoke<StudioAsset & { project_asset_id: string; already_exists: boolean }>('studio_upload', upload.bytes, {
     headers: { 'x-pixoma-upload': upload.metadata },
   })
 }
@@ -895,59 +873,6 @@ export async function uploadStudioAsset(
 export function getStudioAsset(assetId: string) {
   return apiFetch<StudioAsset>(
     `/api/v1/studio/assets/${encodeURIComponent(assetId)}`
-  )
-}
-
-export function updateStudioFlowNodes(
-  sessionId: string,
-  nodes: Array<{
-    id: string
-    position: { x: number; y: number }
-    sort_order: number
-  }>
-) {
-  return apiFetch<void>(
-    `/api/v1/studio/sessions/${encodeURIComponent(sessionId)}/flow`,
-    { method: 'PATCH', body: JSON.stringify({ nodes }) }
-  )
-}
-
-export function createStudioFlowNode(
-  sessionId: string,
-  input: {
-    type: Exclude<StudioFlowNode['type'], 'asset'>
-    title: string
-    body?: string
-    position: { x: number; y: number }
-  }
-) {
-  return apiFetch<StudioFlowNode>(
-    `/api/v1/studio/sessions/${encodeURIComponent(sessionId)}/flow/nodes`,
-    { method: 'POST', body: JSON.stringify(input) }
-  )
-}
-
-export function deleteStudioFlowNode(sessionId: string, nodeId: string) {
-  return apiFetch<void>(
-    `/api/v1/studio/sessions/${encodeURIComponent(sessionId)}/flow/nodes/${encodeURIComponent(nodeId)}`,
-    { method: 'DELETE' }
-  )
-}
-
-export function createStudioFlowEdge(
-  sessionId: string,
-  input: Pick<StudioFlowEdge, 'source' | 'target' | 'label' | 'source_output_key' | 'target_input_key'>
-) {
-  return apiFetch<StudioFlowEdge>(
-    `/api/v1/studio/sessions/${encodeURIComponent(sessionId)}/flow/edges`,
-    { method: 'POST', body: JSON.stringify(input) }
-  )
-}
-
-export function deleteStudioFlowEdge(sessionId: string, edgeId: string) {
-  return apiFetch<void>(
-    `/api/v1/studio/sessions/${encodeURIComponent(sessionId)}/flow/edges/${encodeURIComponent(edgeId)}`,
-    { method: 'DELETE' }
   )
 }
 
@@ -1240,6 +1165,10 @@ export function exportStudioProjectAssets(projectAssetIds: string[]) {
   return desktopInvoke<boolean>('studio_export', { projectAssetIds })
 }
 
+export function exportStudioAssetVersion(assetId: string, versionId: string) {
+  return desktopInvoke<boolean>('studio_export_asset_version', { assetId, versionId })
+}
+
 export function listStudioModels() {
   return apiFetch<StudioModel[]>('/api/v1/studio/models')
 }
@@ -1471,7 +1400,7 @@ export function probeStudioConnector(connectorId: string) {
 }
 
 export function listStudioAgentWorkflows() {
-  return apiFetch<MarketWorkflow[]>('/api/v1/studio/workflow-market')
+  return listWorkflowReferences()
 }
 
 export function updateStudioAgentWorkflow(id: string, agentEnabled: boolean) {

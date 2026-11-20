@@ -10,7 +10,7 @@
     "frontendDist": "../dist"
   },
   "app": {
-    "windows": [{ "title": "Pixoma Studio", "width": 1440, "height": 940, "minWidth": 760, "minHeight": 600 }],
+    "windows": [{ "title": "Pixoma Studio", "titleBarStyle": "Overlay", "hiddenTitle": true, "trafficLightPosition": { "x": 20, "y": 24 }, "width": 1440, "height": 940, "minWidth": 760, "minHeight": 600 }],
     "security": {
       "csp": "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' pixoma-media: http://pixoma-media.localhost blob: data: https:; media-src 'self' pixoma-media: http://pixoma-media.localhost blob: data: https:; font-src 'self' data: https:; connect-src 'self' ipc: http://ipc.localhost pixoma-media: http://pixoma-media.localhost; worker-src 'self' blob:"
     }
@@ -19,11 +19,13 @@
     "active": true,
     "targets": ["app", "dmg"],
     "macOS": { "minimumSystemVersion": "11.0", "signingIdentity": "-" },
-    "externalBin": ["binaries/ffmpeg"],
+    "externalBin": ["binaries/ffmpeg", "binaries/ffprobe", "binaries/edge-agent"],
     "resources": {
+      "resources/timeline-LICENSE.txt": "licenses/timeline-LICENSE.txt",
       "binaries/FFmpeg-LICENSE.txt": "licenses/FFmpeg-LICENSE.txt",
       "binaries/FFmpeg-README.txt": "licenses/FFmpeg-README.txt",
-      "binaries/FFmpeg-source.tar.xz": "licenses/FFmpeg-source.tar.xz"
+      "binaries/FFmpeg-source.tar.xz": "licenses/FFmpeg-source.tar.xz",
+      "binaries/media-libs-licenses/": "licenses/media-libs/"
     }
   }
 }

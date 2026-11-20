@@ -9,35 +9,32 @@ use uuid::Uuid;
 impl Store {
     pub(crate) async fn resolve_tool_approval_in_session(
         &self,
-        account: &str,
         session: &str,
         id: &str,
         approved: bool,
         edited_arguments: Option<Value>,
     ) -> Result<Value> {
-        self.get_session(account, session).await?;
+        self.get_session(session).await?;
         let owner: Option<String> =
-            sqlx::query_scalar("SELECT session_id FROM approvals WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT session_id FROM approvals WHERE id=?")
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await?;
         if owner.as_deref() != Some(session) {
             return Err(Error::NotFound);
         }
-        self.resolve_tool_approval(account, id, approved, edited_arguments)
+        self.resolve_tool_approval(id, approved, edited_arguments)
             .await
     }
 
     pub(crate) async fn pause_for_tool_approval(
         &self,
-        account: &str,
         run_id: &str,
         record: &Value,
         tool: &RunTool,
         call: &ToolCall,
     ) -> Result<()> {
-        let run = self.get_run(account, run_id).await?;
+        let run = self.get_run(run_id).await?;
         let mut call = call.clone();
         if let Some(arguments) = record["approved_arguments"].as_object() {
             call.function.arguments = arguments.clone();
@@ -57,27 +54,26 @@ impl Store {
             "metadata": { "toolCallId": record["id"], "toolName": tool.display_name(), "toolAlias": tool.definition.name, "arguments": arguments, "schema": tool.definition.parameters },
         });
         let mut transaction = self.pool.begin().await?;
-        let changed = sqlx::query("UPDATE tool_calls SET status='waiting_approval',definition=?,updated_at=? WHERE account_id=? AND run_id=? AND id=? AND status='prepared'")
-            .bind(serde_json::to_string(tool)?).bind(&now).bind(account).bind(run_id).bind(text(record, "id")?).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE tool_calls SET status='waiting_approval',definition=?,updated_at=? WHERE run_id=? AND id=? AND status='prepared'")
+            .bind(serde_json::to_string(tool)?).bind(&now).bind(run_id).bind(text(record, "id")?).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("工具审批状态已更改"));
         }
-        sqlx::query("INSERT INTO approvals(id,account_id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?,?)")
-            .bind(&id).bind(account).bind(text(&run, "session_id")?).bind(run_id).bind(&now).bind(approval.to_string()).execute(&mut *transaction).await?;
-        let changed = sqlx::query("UPDATE runs SET document=json_set(document,'$.status','waiting_approval','$.updated_at',?) WHERE account_id=? AND id=? AND status='running'")
-            .bind(&now).bind(account).bind(run_id).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO approvals(id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?)")
+            .bind(&id).bind(text(&run, "session_id")?).bind(run_id).bind(&now).bind(approval.to_string()).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE runs SET document=json_set(document,'$.status','waiting_approval','$.updated_at',?) WHERE id=? AND status='running'")
+            .bind(&now).bind(run_id).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("运行无法等待工具审批"));
         }
         Self::append_event_in(
             &mut transaction,
-            account,
             text(&run, "session_id")?,
             run_id,
             json!({ "type": "CUSTOM", "name": "pixoma.approval_required", "value": approval }),
         )
         .await?;
-        Self::append_event_in(&mut transaction, account, text(&run, "session_id")?, run_id, json!({
+        Self::append_event_in(&mut transaction, text(&run, "session_id")?, run_id, json!({
             "type": "RUN_FINISHED", "threadId": run["session_id"], "runId": run_id,
             "outcome": { "type": "interrupt", "interrupts": [{ "id": id, "reason": "tool_approval", "message": approval["message"], "metadata": approval["metadata"] }] },
         })).await?;
@@ -87,16 +83,14 @@ impl Store {
 
     pub async fn resolve_tool_approval(
         &self,
-        account: &str,
         id: &str,
         approved: bool,
         edited_arguments: Option<Value>,
     ) -> Result<Value> {
-        Self::check_account(account)?;
         let now = timestamp()?;
         let mut transaction = self.pool.begin().await?;
-        let row = sqlx::query("SELECT a.document,a.run_id,t.call,t.definition,t.approved_arguments,t.status AS tool_status FROM approvals a JOIN tool_calls t ON t.run_id=a.run_id AND t.id=json_extract(a.document,'$.tool_call_id') AND t.account_id=a.account_id WHERE a.account_id=? AND a.id=?")
-            .bind(account).bind(id).fetch_optional(&mut *transaction).await?.ok_or(Error::NotFound)?;
+        let row = sqlx::query("SELECT a.document,a.run_id,t.call,t.definition,t.approved_arguments,t.status AS tool_status FROM approvals a JOIN tool_calls t ON t.run_id=a.run_id AND t.id=json_extract(a.document,'$.tool_call_id') WHERE a.id=?")
+            .bind(id).fetch_optional(&mut *transaction).await?.ok_or(Error::NotFound)?;
         let mut approval: Value = serde_json::from_str(row.get("document"))?;
         let run_id: String = row.get("run_id");
         if approval["status"] != "pending" {
@@ -107,7 +101,7 @@ impl Store {
                 return Err(Error::Invalid("审批已经答复，不能修改决定"));
             }
             transaction.commit().await?;
-            return self.get_run(account, &run_id).await;
+            return self.get_run(&run_id).await;
         }
         if row.get::<String, _>("tool_status") != "waiting_approval" {
             return Err(Error::Invalid("工具调用已经结束"));
@@ -134,25 +128,24 @@ impl Store {
                 return Err(Error::Invalid("修改后的工具参数不符合 Schema"));
             }
         }
-        let changed = sqlx::query("UPDATE runs SET document=json_set(document,'$.status','queued','$.updated_at',?,'$.subscription_after_sequence',(SELECT coalesce(max(sequence),0) FROM run_events WHERE run_id=?)) WHERE account_id=? AND id=? AND status='waiting_approval'")
-            .bind(&now).bind(&run_id).bind(account).bind(&run_id).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE runs SET document=json_set(document,'$.status','queued','$.updated_at',?,'$.subscription_after_sequence',(SELECT coalesce(max(sequence),0) FROM run_events WHERE run_id=?)) WHERE id=? AND status='waiting_approval'")
+            .bind(&now).bind(&run_id).bind(&run_id).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::Invalid("运行已经结束或审批状态已更改"));
         }
-        sqlx::query("UPDATE tool_calls SET status=?,approved_arguments=?,updated_at=? WHERE account_id=? AND run_id=? AND id=? AND status='waiting_approval'")
+        sqlx::query("UPDATE tool_calls SET status=?,approved_arguments=?,updated_at=? WHERE run_id=? AND id=? AND status='waiting_approval'")
             .bind(if approved { "approved" } else { "denied" }).bind(edited_arguments.as_ref().map(serde_json::to_string).transpose()?.or(previous_arguments))
-            .bind(&now).bind(account).bind(&run_id).bind(text(&approval, "tool_call_id")?).execute(&mut *transaction).await?;
+            .bind(&now).bind(&run_id).bind(text(&approval, "tool_call_id")?).execute(&mut *transaction).await?;
         approval["status"] = json!(if approved { "approved" } else { "denied" });
         approval["approved"] = json!(approved);
         approval["edited_arguments"] = edited_arguments.unwrap_or(Value::Null);
         approval["updated_at"] = json!(now);
-        sqlx::query("UPDATE approvals SET document=? WHERE account_id=? AND id=?")
+        sqlx::query("UPDATE approvals SET document=? WHERE id=?")
             .bind(approval.to_string())
-            .bind(account)
             .bind(id)
             .execute(&mut *transaction)
             .await?;
         transaction.commit().await?;
-        self.get_run(account, &run_id).await
+        self.get_run(&run_id).await
     }
 }

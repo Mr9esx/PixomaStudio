@@ -4,7 +4,7 @@ export const Route = createFileRoute('/_app/studio/settings/')({
   beforeLoad: () => {
     throw redirect({
       to: '/studio/settings/$section',
-      params: { section: 'sessions' },
+      params: { section: 'general' },
       replace: true,
     })
   },

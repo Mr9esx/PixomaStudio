@@ -2,8 +2,9 @@ import { useState } from 'react'
 import { useMutation, useQueryClient } from '@tanstack/react-query'
 import {
   createStudioProject,
-  renameStudioProject,
+  updateStudioProject,
   type StudioProject,
+  type StudioProjectType,
 } from '@/lib/api/studio'
 import { Button } from '@/components/ui/button'
 import {
@@ -15,7 +16,8 @@ import {
   DialogTitle,
 } from '@/components/ui/dialog'
 import { Input } from '@/components/ui/input'
-import { Label } from '@/components/ui/label'
+import { Field, FieldGroup, FieldLabel } from '@/components/ui/field'
+import { ToggleGroup, ToggleGroupItem } from '@/components/ui/toggle-group'
 
 export function StudioProjectDialog({
   open,
@@ -30,11 +32,12 @@ export function StudioProjectDialog({
 }) {
   const queryClient = useQueryClient()
   const [name, setName] = useState(project?.name ?? '')
+  const [projectType, setProjectType] = useState<StudioProjectType>(project?.project_type ?? 'general')
   const save = useMutation({
     mutationFn: () =>
       project
-        ? renameStudioProject(project.id, name.trim())
-        : createStudioProject(name.trim()),
+        ? updateStudioProject(project.id, name.trim(), projectType)
+        : createStudioProject(name.trim(), projectType),
     onSuccess: async (saved) => {
       await queryClient.invalidateQueries({ queryKey: ['studio', 'projects'] })
       onOpenChange(false)
@@ -52,20 +55,30 @@ export function StudioProjectDialog({
           }}
         >
           <DialogHeader>
-            <DialogTitle>{project ? '重命名项目' : '新建项目'}</DialogTitle>
-            <DialogDescription className='sr-only'>项目名称</DialogDescription>
+            <DialogTitle>{project ? '编辑项目' : '新建项目'}</DialogTitle>
+            <DialogDescription className='sr-only'>设置项目名称与类型</DialogDescription>
           </DialogHeader>
-          <div className='mt-5 space-y-2'>
-            <Label htmlFor='studio-project-name'>项目名称</Label>
-            <Input
-              id='studio-project-name'
-              autoFocus
-              maxLength={80}
-              required
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-            />
-          </div>
+          <FieldGroup className='mt-5 gap-4'>
+            <Field>
+              <FieldLabel htmlFor='studio-project-name'>项目名称</FieldLabel>
+              <Input
+                id='studio-project-name'
+                disabled={save.isPending}
+                autoFocus
+                maxLength={80}
+                required
+                value={name}
+                onChange={(event) => setName(event.target.value)}
+              />
+            </Field>
+            <Field>
+              <FieldLabel id='studio-project-type-label'>项目类型</FieldLabel>
+              <ToggleGroup type='single' variant='outline' size='sm' disabled={save.isPending} aria-labelledby='studio-project-type-label' value={projectType} onValueChange={(value) => { if (value === 'general' || value === 'video') setProjectType(value) }}>
+                <ToggleGroupItem value='general' className='flex-1'>通用</ToggleGroupItem>
+                <ToggleGroupItem value='video' className='flex-1'>视频</ToggleGroupItem>
+              </ToggleGroup>
+            </Field>
+          </FieldGroup>
           {save.isError ? (
             <p role='alert' className='mt-2 text-sm text-destructive'>
               {save.error.message}
@@ -75,12 +88,13 @@ export function StudioProjectDialog({
             <Button
               type='button'
               variant='outline'
+              size='sm'
               onClick={() => onOpenChange(false)}
             >
               取消
             </Button>
-            <Button type='submit' disabled={!name.trim() || save.isPending}>
-              {save.isPending ? '保存中…' : '确认'}
+            <Button type='submit' size='sm' disabled={!name.trim() || save.isPending}>
+              {save.isPending ? '保存中…' : '保存项目'}
             </Button>
           </DialogFooter>
         </form>

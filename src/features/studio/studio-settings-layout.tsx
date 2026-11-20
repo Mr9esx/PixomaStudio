@@ -1,25 +1,22 @@
 import type { ReactNode } from 'react'
-import { cn } from '@/lib/utils'
 import { Button } from '@/components/ui/button'
 
 export function StudioSettingsLayout<Section extends string>({
   title,
-  headerClassName,
   sections,
   section,
   onSectionChange,
   children,
 }: {
   title: string
-  headerClassName?: string
   sections: { id: Section; label: string }[]
   section: Section
   onSectionChange: (section: Section) => void
   children: ReactNode
 }) {
   return (
-    <section className='flex h-full min-h-0 min-w-0 flex-1 flex-col overflow-hidden rounded-2xl border bg-card'>
-      <header className={cn('flex min-h-16 items-center gap-3 border-b px-5', headerClassName)}>
+    <section className='flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden'>
+      <header data-tauri-drag-region='deep' className='studio-page-header'>
         <h1 className='text-sm font-semibold'>{title}</h1>
       </header>
       <div className='flex min-h-0 flex-1 flex-col min-[920px]:flex-row'>

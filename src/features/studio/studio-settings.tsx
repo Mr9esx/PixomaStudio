@@ -62,17 +62,24 @@ import {
 import { Switch } from '@/components/ui/switch'
 import { LongText } from '@/components/long-text'
 import { StatusDot } from '@/components/status-dot'
-import { SkillWorkspaceDialog } from './skill-workspace-dialog'
+import { SkillWorkspace } from './skill-workspace'
 import { connectorStatus } from './studio-connector-status'
 import { StudioSettingsLayout } from './studio-settings-layout'
+import { StudioComputeSettings } from './studio-compute-settings'
+import { StudioSessionManagement } from './studio-session-management'
 
-export type SettingSection = 'models' | 'skills' | 'mcp'
+export type SettingSection = 'general' | 'models' | 'skills' | 'mcp' | 'compute-nodes'
 
 const settingSections: Array<{
   id: SettingSection
   label: string
   description: string
 }> = [
+  {
+    id: 'general',
+    label: '通用',
+    description: '',
+  },
   {
     id: 'models',
     label: '模型',
@@ -88,14 +95,43 @@ const settingSections: Array<{
     label: '外部 MCP 服务',
     description: '配置外部工具连接和调用策略',
   },
+  {
+    id: 'compute-nodes',
+    label: '计算节点',
+    description: '管理 ComfyUI 计算节点',
+  },
 ]
 
 export function StudioSettings({
   section,
   onSectionChange,
   contentOnly = false,
+  createNode = false,
+  onCreateNodeHandled = () => {},
+  onReturnWorkflow,
+  onSessionsCleared,
 }: {
   section: SettingSection
+  onSectionChange: (section: SettingSection) => void
+  contentOnly?: boolean
+  createNode?: boolean
+  onCreateNodeHandled?: () => void
+  onReturnWorkflow?: () => void
+  onSessionsCleared?: () => void
+}) {
+  if (section !== 'compute-nodes' && section !== 'general') return <StudioResourceSettings section={section} onSectionChange={onSectionChange} contentOnly={contentOnly} />
+  const content = section === 'general'
+    ? <StudioSessionManagement onSessionsCleared={onSessionsCleared} />
+    : <StudioComputeSettings create={createNode} onCreateHandled={onCreateNodeHandled} onReturnWorkflow={onReturnWorkflow} />
+  return contentOnly ? content : <StudioSettingsLayout title='设置' sections={settingSections} section={section} onSectionChange={onSectionChange}>{content}</StudioSettingsLayout>
+}
+
+function StudioResourceSettings({
+  section,
+  onSectionChange,
+  contentOnly = false,
+}: {
+  section: Exclude<SettingSection, 'compute-nodes' | 'general'>
   onSectionChange: (section: SettingSection) => void
   contentOnly?: boolean
 }) {
@@ -166,10 +202,12 @@ export function StudioSettings({
   })
   const activeSection = settingSections.find((item) => item.id === section)!
 
+  if (skillDialogOpen) return <SkillWorkspace scope='studio' skillId={editingSkill?.id} imported={importedSkill} open onOpenChange={open => { setSkillDialogOpen(open); if (!open) { setEditingSkill(undefined); setImportedSkill(undefined) } }} />
+
   const content = (
     <>
-            <ScrollArea key={section} className='min-h-0 flex-1'>
-              <div className='px-5 pt-6 sm:px-6 sm:pt-8'>
+            <ScrollArea key={section} className='min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:flex! [&_[data-slot=scroll-area-viewport]>div]:min-h-full [&_[data-slot=scroll-area-viewport]>div]:flex-col'>
+              <div className='px-5 pt-3'>
                 <div className='mx-auto flex max-w-4xl flex-wrap items-center justify-between gap-4'>
                   <div>
                     <h2 className='text-lg font-semibold'>
@@ -243,8 +281,8 @@ export function StudioSettings({
                 </div>
               </div>
               {section === 'models' ? (
-                <div className='p-5 sm:p-6'>
-                  <div className='mx-auto flex max-w-4xl flex-col gap-4'>
+                <div className='flex flex-1 flex-col px-5 pt-3 pb-5'>
+                  <div className='mx-auto flex w-full max-w-4xl flex-1 flex-col gap-4'>
                     {models.isLoading ? (
                       <p className='text-sm text-muted-foreground'>
                         正在读取模型…
@@ -351,7 +389,7 @@ export function StudioSettings({
                 </div>
               ) : null}
               {section === 'skills' ? (
-                <div className='p-5 sm:p-6'>
+                <div className='flex flex-1 flex-col px-5 pt-3 pb-5'>
                   <SkillSettings
                     skills={skills.data ?? []}
                     loading={skills.isLoading}
@@ -367,7 +405,7 @@ export function StudioSettings({
                 </div>
               ) : null}
               {section === 'mcp' ? (
-                <div className='p-5 sm:p-6'>
+                <div className='flex flex-1 flex-col px-5 pt-3 pb-5'>
                   <ConnectorSettings
                     connectors={connectors.data ?? []}
                     loading={connectors.isLoading}
@@ -388,20 +426,6 @@ export function StudioSettings({
             onOpenChange={(open) => {
               setModelDialogOpen(open)
               if (!open) setEditingModel(undefined)
-            }}
-          />
-        ) : null}
-        {skillDialogOpen ? (
-          <SkillWorkspaceDialog
-            skillId={editingSkill?.id}
-            imported={importedSkill}
-            open={skillDialogOpen}
-            onOpenChange={(open) => {
-              setSkillDialogOpen(open)
-              if (!open) {
-                setEditingSkill(undefined)
-                setImportedSkill(undefined)
-              }
             }}
           />
         ) : null}
@@ -470,7 +494,7 @@ function ConnectorSettings({
     },
   })
   return (
-    <div className='mx-auto flex max-w-4xl flex-col gap-4'>
+    <div className='mx-auto flex w-full max-w-4xl flex-1 flex-col gap-4'>
       {loading ? (
         <p className='text-sm text-muted-foreground'>正在读取连接器…</p>
       ) : null}
@@ -813,7 +837,7 @@ function SkillSettings({
       toast.error(cause instanceof Error ? cause.message : '更新启用状态失败'),
   })
   return (
-    <div className='mx-auto flex max-w-4xl flex-col gap-4'>
+    <div className='mx-auto flex w-full max-w-4xl flex-1 flex-col gap-4'>
       {loading ? (
         <p className='text-sm text-muted-foreground'>正在读取技能…</p>
       ) : null}
@@ -1308,12 +1332,12 @@ function SettingsEmpty({
   description: string
 }) {
   return (
-    <Empty className='min-h-72 border bg-muted/10'>
+    <Empty className='border bg-muted/10'>
       <EmptyHeader>
         <EmptyMedia variant='icon'>
           <Icon />
         </EmptyMedia>
-        <EmptyTitle className='text-sm'>{title}</EmptyTitle>
+        <EmptyTitle>{title}</EmptyTitle>
         <EmptyDescription>{description}</EmptyDescription>
       </EmptyHeader>
     </Empty>

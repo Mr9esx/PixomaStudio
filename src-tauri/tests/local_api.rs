@@ -9,7 +9,6 @@ async fn request(
     body: serde_json::Value,
 ) -> pixoma_studio::Result<serde_json::Value> {
     api.request(
-        "account-a",
         LocalRequest {
             method: method.to_owned(),
             path: path.to_owned(),
@@ -17,6 +16,44 @@ async fn request(
         },
     )
     .await
+}
+
+#[tokio::test]
+async fn project_types_persist_and_reject_invalid_values()
+-> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.local-cache");
+    std::fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new().prefix("project-types-").tempdir_in(root)?;
+    let path = directory.path().join("studio.sqlite");
+    let store = Store::open(&path).await?;
+    let api = LocalApi::new(store.clone());
+    let general = request(&api, "POST", "/api/v1/studio/projects", json!({"name":"混合创作"})).await?;
+    assert_eq!(general["project_type"], "general");
+    let video = request(&api, "POST", "/api/v1/studio/projects", json!({"name":"山间茶事","project_type":"video"})).await?;
+    assert_eq!(video["project_type"], "video");
+    let id = video["id"].as_str().ok_or("项目标识缺失")?;
+    let route = format!("/api/v1/studio/projects/{id}");
+    let renamed = request(&api, "PATCH", &route, json!({"name":"品牌短片"})).await?;
+    assert_eq!(renamed["project_type"], "video");
+    let session = store.create_session("project-type-session").await?;
+    store.move_session(&session.id, Some(id)).await?;
+    let asset = store.create_text_asset(&session.id, "剧本.md", "清晨的山间茶园", "project-type-asset").await?;
+    for value in [json!("unknown"), json!(0), json!({}), json!(["video"])] {
+        assert!(request(&api, "POST", "/api/v1/studio/projects", json!({"name":"非法类型","project_type":value})).await.is_err());
+        assert!(request(&api, "PATCH", &route, json!({"name":"不可写入","project_type":value})).await.is_err());
+        assert_eq!(store.get_project(id).await?.name, "品牌短片");
+    }
+    let updated = request(&api, "PATCH", &route, json!({"name":"品牌素材","project_type":null})).await?;
+    assert_eq!(updated["project_type"], "general");
+    assert_eq!(store.get_session(&session.id).await?.project_id.as_deref(), Some(id));
+    assert_eq!(store.list_session_assets(&session.id).await?[0].id, asset.id);
+    store.close().await;
+    let reopened = Store::open(&path).await?;
+    let projects = request(&LocalApi::new(reopened.clone()), "GET", "/api/v1/studio/projects", json!(null)).await?;
+    assert_eq!(projects.as_array().ok_or("项目列表缺失")?.len(), 2);
+    assert_eq!(projects.as_array().unwrap().iter().find(|item| item["id"] == id).unwrap()["project_type"], "general");
+    reopened.close().await;
+    Ok(())
 }
 
 #[tokio::test]
@@ -29,21 +66,17 @@ async fn library_tree_preserves_groups_nested_categories_and_pagination()
         .tempdir_in(root)?;
     let store = Store::open(&directory.path().join("studio.sqlite")).await?;
     let api = LocalApi::new(store.clone());
-    let session = store.create_session("account-a", "session").await?;
+    let session = store.create_session("session").await?;
     let first = store
-        .create_text_asset("account-a", &session.id, "初稿.md", "正文", "first")
+        .create_text_asset(&session.id, "初稿.md", "正文", "first")
         .await?;
     let second = store
-        .create_text_asset("account-a", &session.id, "终稿.md", "更新正文", "second")
+        .create_text_asset(&session.id, "终稿.md", "更新正文", "second")
         .await?;
-    let parent = store.create_category("account-a", "", "文稿", "").await?;
+    let parent = store.create_category("", "文稿", "").await?;
     let parent_id = parent["id"].as_str().ok_or("分类标识缺失")?;
-    let child = store
-        .create_category("account-a", "", "终稿", parent_id)
-        .await?;
-    let page = store
-        .library_assets("account-a", &Default::default())
-        .await?;
+    let child = store.create_category("", "终稿", parent_id).await?;
+    let page = store.library_assets(&Default::default()).await?;
     let items = page["items"].as_array().ok_or("资产列表缺失")?;
     let first_id = items
         .iter()
@@ -58,14 +91,10 @@ async fn library_tree_preserves_groups_nested_categories_and_pagination()
         .as_str()
         .ok_or("项目资产标识缺失")?;
     store
-        .patch_project_asset("account-a", first_id, &json!({ "category_id": parent_id }))
+        .patch_project_asset(first_id, &json!({ "category_id": parent_id }))
         .await?;
     store
-        .patch_project_asset(
-            "account-a",
-            second_id,
-            &json!({ "category_id": child["id"] }),
-        )
+        .patch_project_asset(second_id, &json!({ "category_id": child["id"] }))
         .await?;
     for mode in ["asset", "session", "category", "format", "rating", "tag"] {
         let path = format!("/api/v1/studio/library/tree?project_id=&mode={mode}&limit=1");
@@ -125,14 +154,12 @@ async fn library_copy_versions_duplicates_and_batch_tags_use_owned_records()
         .tempdir_in(root)?;
     let store = Store::open(&directory.path().join("studio.sqlite")).await?;
     let api = LocalApi::new(store.clone());
-    let project = store.create_project("account-a", "发布").await?;
-    let session = store.create_session("account-a", "session").await?;
+    let project = store.create_project("发布").await?;
+    let session = store.create_session("session").await?;
     let asset = store
-        .create_text_asset("account-a", &session.id, "内容.md", "正文", "asset")
+        .create_text_asset(&session.id, "内容.md", "正文", "asset")
         .await?;
-    let source = store
-        .library_assets("account-a", &Default::default())
-        .await?;
+    let source = store.library_assets(&Default::default()).await?;
     let source_id = source["items"][0]["id"]
         .as_str()
         .ok_or("项目资产标识缺失")?;
@@ -146,7 +173,7 @@ async fn library_copy_versions_duplicates_and_batch_tags_use_owned_records()
     let copy_id = copy["id"].as_str().ok_or("复制资产标识缺失")?;
     assert_eq!(copy["copy_source"]["project_asset_id"], source_id);
     let updated = store
-        .update_text_asset("account-a", &asset.id, "更新正文", "update")
+        .update_text_asset(&asset.id, "更新正文", "update")
         .await?;
     let latest = updated
         .versions
@@ -162,11 +189,11 @@ async fn library_copy_versions_duplicates_and_batch_tags_use_owned_records()
     .await?;
     assert_eq!(copy["asset_version_id"], latest.id);
     assert_eq!(
-        store.project_asset("account-a", source_id).await?["asset_version_id"],
+        store.project_asset(source_id).await?["asset_version_id"],
         asset.versions[0].id
     );
     let duplicate = store
-        .create_text_asset("account-a", &session.id, "重复.md", "更新正文", "duplicate")
+        .create_text_asset(&session.id, "重复.md", "更新正文", "duplicate")
         .await?;
     let duplicate_page = request(
         &api,
@@ -186,8 +213,8 @@ async fn library_copy_versions_duplicates_and_batch_tags_use_owned_records()
         .await
         .is_err()
     );
-    let first = store.create_tag("account-a", "原标签").await?;
-    let second = store.create_tag("account-a", "新增标签").await?;
+    let first = store.create_tag("原标签").await?;
+    let second = store.create_tag("新增标签").await?;
     request(
         &api,
         "PUT",
@@ -204,14 +231,14 @@ async fn library_copy_versions_duplicates_and_batch_tags_use_owned_records()
         )
         .await?;
         assert_eq!(result["results"][0]["success"], true);
-        let tags = store.project_asset("account-a", copy_id).await?["tags"]
+        let tags = store.project_asset(copy_id).await?["tags"]
             .as_array()
             .ok_or("标签列表缺失")?
             .clone();
         assert_eq!(tags.len(), if action == "tags" { 2 } else { 1 });
     }
     assert_eq!(
-        store.project_asset("account-a", copy_id).await?["tags"][0]["id"],
+        store.project_asset(copy_id).await?["tags"][0]["id"],
         first["id"]
     );
     let projects = request(&api, "GET", "/api/v1/studio/library/projects", json!(null)).await?;
@@ -249,13 +276,11 @@ async fn library_category_routes_reject_cycles_and_preserve_assets_when_deleted(
         .tempdir_in(root)?;
     let store = Store::open(&directory.path().join("studio.sqlite")).await?;
     let api = LocalApi::new(store.clone());
-    let project = store.create_project("account-a", "文档").await?;
-    let session = store.create_session("account-a", "session").await?;
+    let project = store.create_project("文档").await?;
+    let session = store.create_session("session").await?;
+    store.move_session(&session.id, Some(&project.id)).await?;
     store
-        .move_session("account-a", &session.id, Some(&project.id))
-        .await?;
-    store
-        .create_text_asset("account-a", &session.id, "正文.md", "正文", "asset")
+        .create_text_asset(&session.id, "正文.md", "正文", "asset")
         .await?;
     let parent = request(
         &api,
@@ -317,7 +342,7 @@ async fn library_category_routes_reject_cycles_and_preserve_assets_when_deleted(
     )
     .await?;
     assert_eq!(
-        store.project_asset("account-a", placement).await?["category_id"],
+        store.project_asset(placement).await?["category_id"],
         parent_id
     );
     let categories = request(
@@ -367,7 +392,6 @@ async fn project_and_session_routes_operate_on_the_real_database()
     let api = LocalApi::new(store.clone());
     let project = api
         .request(
-            "account-a",
             LocalRequest {
                 method: "POST".to_owned(),
                 path: "/api/v1/studio/projects".to_owned(),
@@ -378,7 +402,6 @@ async fn project_and_session_routes_operate_on_the_real_database()
     let project_id = project["id"].as_str().ok_or("项目标识缺失")?;
     let session = api
         .request(
-            "account-a",
             LocalRequest {
                 method: "POST".to_owned(),
                 path: "/api/v1/studio/sessions".to_owned(),
@@ -388,7 +411,6 @@ async fn project_and_session_routes_operate_on_the_real_database()
         .await?;
     let id = session["id"].as_str().ok_or("会话标识缺失")?;
     api.request(
-        "account-a",
         LocalRequest {
             method: "PATCH".to_owned(),
             path: format!("/api/v1/studio/sessions/{id}/project"),
@@ -398,7 +420,6 @@ async fn project_and_session_routes_operate_on_the_real_database()
     .await?;
     let list = api
         .request(
-            "account-a",
             LocalRequest {
                 method: "GET".to_owned(),
                 path: format!("/api/v1/studio/sessions?project_id={project_id}&limit=30"),
@@ -408,19 +429,14 @@ async fn project_and_session_routes_operate_on_the_real_database()
         .await?;
     assert_eq!(list[0]["id"], id);
     assert_eq!(
-        store
-            .get_session("account-a", id)
-            .await?
-            .project_id
-            .as_deref(),
+        store.get_session(id).await?.project_id.as_deref(),
         Some(project_id)
     );
     assert!(
         api.request(
-            "account-b",
             LocalRequest {
                 method: "GET".to_owned(),
-                path: format!("/api/v1/studio/sessions/{id}"),
+                path: "/api/v1/studio/sessions/missing-session".to_owned(),
                 body: None,
             }
         )
@@ -443,7 +459,6 @@ async fn unknown_routes_and_invalid_parameters_fail_without_creating_records()
     let api = LocalApi::new(store.clone());
     assert!(
         api.request(
-            "account-a",
             LocalRequest {
                 method: "GET".to_owned(),
                 path: "/api/v1/studio/sessions?limit=invalid".to_owned(),
@@ -455,7 +470,6 @@ async fn unknown_routes_and_invalid_parameters_fail_without_creating_records()
     );
     assert!(
         api.request(
-            "account-a",
             LocalRequest {
                 method: "POST".to_owned(),
                 path: "/api/v1/studio/unknown".to_owned(),
@@ -467,7 +481,6 @@ async fn unknown_routes_and_invalid_parameters_fail_without_creating_records()
     );
     assert!(
         api.request(
-            "account-a",
             LocalRequest {
                 method: "GET".to_owned(),
                 path: "https://example.com/api/v1/studio/projects".to_owned(),
@@ -477,7 +490,7 @@ async fn unknown_routes_and_invalid_parameters_fail_without_creating_records()
         .await
         .is_err()
     );
-    assert!(store.list_projects("account-a").await?.is_empty());
+    assert!(store.list_projects().await?.is_empty());
     store.close().await;
     Ok(())
 }

@@ -1,0 +1,1 @@
+ALTER TABLE online_executions ADD COLUMN waiting INTEGER NOT NULL DEFAULT 1;

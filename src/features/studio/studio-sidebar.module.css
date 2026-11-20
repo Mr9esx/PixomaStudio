@@ -63,6 +63,10 @@
   transition: opacity 150ms ease;
 }
 
+.sectionToggle:hover {
+  background-color: transparent;
+}
+
 .section[data-expanded='true'] .sectionContent {
   opacity: 1;
 }

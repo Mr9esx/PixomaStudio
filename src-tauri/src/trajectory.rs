@@ -44,21 +44,19 @@ fn tool_record(row: &sqlx::sqlite::SqliteRow, tool: Option<&RunTool>, call: &Too
 impl Store {
     pub(crate) async fn trajectory_records(
         &self,
-        account: &str,
         run_id: &str,
     ) -> Result<Vec<Value>> {
-        let run = self.get_run(account, run_id).await?;
+        let run = self.get_run(run_id).await?;
         let mut records = Vec::new();
-        let requests: Vec<String> = sqlx::query_scalar("SELECT json_remove(document,'$.parts') FROM model_requests WHERE account_id=? AND run_id=? ORDER BY created_at,id")
-            .bind(account).bind(run_id).fetch_all(&self.pool).await?;
+        let requests: Vec<String> = sqlx::query_scalar("SELECT json_remove(document,'$.parts') FROM model_requests WHERE run_id=? ORDER BY created_at,id")
+            .bind(run_id).fetch_all(&self.pool).await?;
         for request in requests {
             records.push(model_record(&serde_json::from_str::<Value>(&request)?));
         }
-        let tools = self.run_tools_for_history(account, run_id).await?;
+        let tools = self.run_tools_for_history(run_id).await?;
         let calls = sqlx::query(
-            "SELECT * FROM tool_calls WHERE account_id=? AND run_id=? ORDER BY created_at,id",
+            "SELECT * FROM tool_calls WHERE run_id=? ORDER BY created_at,id",
         )
-        .bind(account)
         .bind(run_id)
         .fetch_all(&self.pool)
         .await?;
@@ -72,8 +70,8 @@ impl Store {
                 &call,
             ));
         }
-        let messages: Vec<String> = sqlx::query_scalar("SELECT document FROM messages WHERE account_id=? AND session_id=? AND json_extract(document,'$.run_id')=? ORDER BY created_at,id")
-            .bind(account).bind(text(&run, "session_id")?).bind(run_id).fetch_all(&self.pool).await?;
+        let messages: Vec<String> = sqlx::query_scalar("SELECT document FROM messages WHERE session_id=? AND json_extract(document,'$.run_id')=? ORDER BY created_at,id")
+            .bind(text(&run, "session_id")?).bind(run_id).fetch_all(&self.pool).await?;
         for message in messages {
             let message: Value = serde_json::from_str(&message)?;
             if message["role"] == "user" {
@@ -103,10 +101,9 @@ impl Store {
         Ok(records)
     }
 
-    async fn run_tools_for_history(&self, account: &str, id: &str) -> Result<Vec<RunTool>> {
+    async fn run_tools_for_history(&self, id: &str) -> Result<Vec<RunTool>> {
         let document: Option<String> =
-            sqlx::query_scalar("SELECT tool_snapshot FROM runs WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT tool_snapshot FROM runs WHERE id=?")
                 .bind(id)
                 .fetch_one(&self.pool)
                 .await?;
@@ -118,13 +115,12 @@ impl Store {
 
     pub(crate) async fn trajectory(
         &self,
-        account: &str,
         session: &str,
         before: Option<&str>,
     ) -> Result<Value> {
-        self.get_session(account, session).await?;
+        self.get_session(session).await?;
         let cursor = if let Some(before) = before.filter(|before| !before.is_empty()) {
-            let run = self.get_run(account, before).await?;
+            let run = self.get_run(before).await?;
             if run["session_id"] != session {
                 return Err(Error::NotFound);
             }
@@ -132,18 +128,17 @@ impl Store {
         } else {
             None
         };
-        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM runs WHERE account_id=? AND session_id=? AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 21")
-            .bind(account).bind(session).bind(cursor.as_ref().map(|cursor| &cursor.0)).bind(cursor.as_ref().map(|cursor| &cursor.0))
+        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM runs WHERE session_id=? AND (? IS NULL OR created_at<? OR (created_at=? AND id<?)) ORDER BY created_at DESC,id DESC LIMIT 21")
+            .bind(session).bind(cursor.as_ref().map(|cursor| &cursor.0)).bind(cursor.as_ref().map(|cursor| &cursor.0))
             .bind(cursor.as_ref().map(|cursor| &cursor.0)).bind(cursor.as_ref().map(|cursor| &cursor.1)).fetch_all(&self.pool).await?;
         let mut runs = Vec::new();
         for row in rows.iter().take(20) {
             let run: Value = serde_json::from_str(row)?;
-            let records = self.trajectory_records(account, text(&run, "id")?).await?;
+            let records = self.trajectory_records(text(&run, "id")?).await?;
             runs.push(json!({ "run": run, "records": records }));
         }
         let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM runs WHERE account_id=? AND session_id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT count(*) FROM runs WHERE session_id=?")
                 .bind(session)
                 .fetch_one(&self.pool)
                 .await?;
@@ -154,19 +149,18 @@ impl Store {
 
     pub(crate) async fn trajectory_detail(
         &self,
-        account: &str,
         session: &str,
         run_id: &str,
         id: &str,
     ) -> Result<Value> {
-        self.get_session(account, session).await?;
-        let run = self.get_run(account, run_id).await?;
+        self.get_session(session).await?;
+        let run = self.get_run(run_id).await?;
         if run["session_id"] != session {
             return Err(Error::NotFound);
         }
         if let Some(attempt) = id.strip_prefix("model:") {
-            let row = sqlx::query("SELECT document,request,response FROM model_requests WHERE account_id=? AND session_id=? AND run_id=? AND id=?")
-                .bind(account).bind(session).bind(run_id).bind(attempt).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
+            let row = sqlx::query("SELECT document,request,response FROM model_requests WHERE session_id=? AND run_id=? AND id=?")
+                .bind(session).bind(run_id).bind(attempt).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
             let document: Value = serde_json::from_str(row.get("document"))?;
             let input: Value = serde_json::from_str(row.get("request"))?;
             let output: Value = row
@@ -183,15 +177,14 @@ impl Store {
         }
         if let Some(call_id) = id.strip_prefix("tool:") {
             let row =
-                sqlx::query("SELECT * FROM tool_calls WHERE account_id=? AND run_id=? AND id=?")
-                    .bind(account)
+                sqlx::query("SELECT * FROM tool_calls WHERE run_id=? AND id=?")
                     .bind(run_id)
                     .bind(call_id)
                     .fetch_optional(&self.pool)
                     .await?
                     .ok_or(Error::NotFound)?;
             let call: ToolCall = serde_json::from_str(row.get("call"))?;
-            let tools = self.run_tools_for_history(account, run_id).await?;
+            let tools = self.run_tools_for_history(run_id).await?;
             let tool = tools
                 .iter()
                 .find(|tool| tool.definition.name == call.function.name)
@@ -207,9 +200,8 @@ impl Store {
                 .transpose()?
                 .unwrap_or(Value::Null);
             let mcp_execution: Option<String> = sqlx::query_scalar(
-                "SELECT document FROM mcp_executions WHERE account_id=? AND run_id=? AND id=?",
+                "SELECT document FROM mcp_executions WHERE run_id=? AND id=?",
             )
-            .bind(account)
             .bind(run_id)
             .bind(call_id)
             .fetch_optional(&self.pool)
@@ -230,8 +222,8 @@ impl Store {
         }
         for kind in ["user", "assistant", "reasoning"] {
             if let Some(message_id) = id.strip_prefix(&format!("{kind}:")) {
-                let document: String = sqlx::query_scalar("SELECT document FROM messages WHERE account_id=? AND session_id=? AND id=? AND json_extract(document,'$.run_id')=?")
-                    .bind(account).bind(session).bind(message_id).bind(run_id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
+                let document: String = sqlx::query_scalar("SELECT document FROM messages WHERE session_id=? AND id=? AND json_extract(document,'$.run_id')=?")
+                    .bind(session).bind(message_id).bind(run_id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
                 let message: Value = serde_json::from_str(&document)?;
                 if message["role"] != if kind == "user" { "user" } else { "assistant" } {
                     return Err(Error::NotFound);

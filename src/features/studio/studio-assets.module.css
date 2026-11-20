@@ -20,6 +20,33 @@
   display: none;
 }
 
+.compactActions .secondaryActions {
+  display: none;
+}
+
+.compactActions .moreActions {
+  display: inline-flex;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .inlineActions {
+    opacity: 0;
+    transition: opacity 120ms ease;
+  }
+
+  .card:hover .inlineActions,
+  .card:focus-within .inlineActions,
+  .inlineActions:has([data-state='open']) {
+    opacity: 1;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .inlineActions {
+    transition: none;
+  }
+}
+
 @container asset-card (max-width: 8.5rem) {
   .actions[data-secondary-count='1'] .secondaryActions {
     display: none;

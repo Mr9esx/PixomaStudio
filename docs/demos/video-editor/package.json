@@ -1,0 +1,17 @@
+{
+  "name": "pixoma-video-editor-demo",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5292 --strictPort",
+    "build": "vite build",
+    "test": "node --test model.test.mjs lifecycle.test.mjs"
+  },
+  "dependencies": {
+    "@remotion/player": "4.0.539",
+    "remotion": "4.0.539"
+  },
+  "devDependencies": {
+    "vite-plugin-singlefile": "2.3.4"
+  }
+}

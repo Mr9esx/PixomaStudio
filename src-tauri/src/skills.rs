@@ -171,12 +171,11 @@ pub(crate) fn stable_version(value: &str) -> Result<semver::Version> {
 impl Store {
     pub(crate) async fn load_run_skill(
         &self,
-        account: &str,
         tool_call_id: &str,
         input: &Value,
     ) -> Result<Value> {
-        let document: String = sqlx::query_scalar("SELECT r.context_snapshot FROM runs r JOIN tool_calls t ON t.run_id=r.id AND t.account_id=r.account_id WHERE t.account_id=? AND t.id=?")
-            .bind(account).bind(tool_call_id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
+        let document: String = sqlx::query_scalar("SELECT r.context_snapshot FROM runs r JOIN tool_calls t ON t.run_id=r.id WHERE t.id=?")
+            .bind(tool_call_id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
         let context: crate::context::RunContext = serde_json::from_str(&document)?;
         let id = text(input, "skill_id")?;
         let skill = context
@@ -249,75 +248,12 @@ impl Store {
         )
     }
 
-    pub(crate) async fn cache_official_skill(
-        &self,
-        account: &str,
-        mut current: Value,
-        mut version: Value,
-        source_url: &str,
-    ) -> Result<()> {
-        Self::check_account(account)?;
-        let id = text(&current, "id")?.to_owned();
-        let version_number = text(&version, "version")?.to_owned();
-        stable_version(&version_number)?;
-        for item in [&current, &version] {
-            let prompt = text(item, "prompt")?;
-            if prompt.trim().is_empty() || prompt.len() > MAX_FILE_BYTES {
-                return Err(Error::Invalid("官方技能操作说明无效或超过 256 KiB"));
-            }
-            if let Some(files) = item["files"].as_array().filter(|files| !files.is_empty()) {
-                let files: Vec<SkillFile> = serde_json::from_value(json!(files))
-                    .map_err(|_| Error::Invalid("官方技能文件内容无效"))?;
-                let (name, description, manifest) = validate_files(&files)?;
-                if name != text(item, "name")?
-                    || description != text(item, "description")?
-                    || manifest != prompt
-                {
-                    return Err(Error::Invalid("官方技能文件与元数据不一致"));
-                }
-            }
-        }
-        let content_digest = digest(&serde_json::to_vec(&json!({
-            "name": version["name"], "description": version["description"], "prompt": version["prompt"], "files": version["files"],
-        }))?);
-        for item in [&mut current, &mut version] {
-            item["id"] = json!(id);
-            item["account_id"] = json!(account);
-            item["publisher_source"] = item["source"].clone();
-            item["source"] = json!("official");
-            item["source_url"] = json!(source_url);
-            item["received_at"] = json!(timestamp()?);
-        }
-        version["content_digest"] = json!(content_digest);
-        let mut transaction = self.pool.begin().await?;
-        let changed = sqlx::query("INSERT INTO skills(account_id,id,source,document) VALUES(?,?,'official',?) ON CONFLICT(account_id,id) DO UPDATE SET document=excluded.document WHERE skills.source='official'")
-            .bind(account).bind(&id).bind(current.to_string()).execute(&mut *transaction).await?;
-        if changed.rows_affected() != 1 {
-            return Err(Error::Invalid("官方技能标识与个人技能重复"));
-        }
-        let existing: Option<String> = sqlx::query_scalar("SELECT content_digest FROM skill_versions WHERE account_id=? AND skill_id=? AND version=?")
-            .bind(account).bind(&id).bind(&version_number).fetch_optional(&mut *transaction).await?;
-        if existing
-            .as_ref()
-            .is_some_and(|existing| existing != &content_digest)
-        {
-            return Err(Error::State("官方技能同一版本的内容发生变化"));
-        }
-        sqlx::query("INSERT INTO skill_versions(account_id,skill_id,version,document,content_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING")
-            .bind(account).bind(&id).bind(version_number).bind(version.to_string()).bind(content_digest).execute(&mut *transaction).await?;
-        transaction.commit().await?;
-        Ok(())
-    }
-
-    pub(crate) async fn list_skills(&self, account: &str) -> Result<Value> {
-        Self::check_account(account)?;
-        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM skills WHERE account_id=? AND source='user' ORDER BY json_extract(document,'$.updated_at') DESC,id")
-            .bind(account).fetch_all(&self.pool).await?;
+    pub(crate) async fn list_skills(&self) -> Result<Value> {
+        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM skills WHERE source='user' ORDER BY json_extract(document,'$.updated_at') DESC,id")
+            .fetch_all(&self.pool).await?;
         let mut items = Vec::with_capacity(rows.len());
         for row in rows {
             let mut item: Value = serde_json::from_str(&row)?;
-            self.apply_publication_state(account, "skill", &mut item)
-                .await?;
             let fields = item
                 .as_object_mut()
                 .ok_or(Error::State("技能记录格式无效"))?;
@@ -328,25 +264,19 @@ impl Store {
         Ok(json!(items))
     }
 
-    pub(crate) async fn get_skill(&self, account: &str, id: &str) -> Result<Value> {
-        Self::check_account(account)?;
-        let document: String =
-            sqlx::query_scalar("SELECT document FROM skills WHERE account_id=? AND id=?")
-                .bind(account)
-                .bind(id)
-                .fetch_optional(&self.pool)
-                .await?
-                .ok_or(Error::NotFound)?;
-        let mut asset = serde_json::from_str(&document)?;
-        self.apply_publication_state(account, "skill", &mut asset)
-            .await?;
-        Ok(asset)
+    pub(crate) async fn get_skill(&self, id: &str) -> Result<Value> {
+        let document: String = sqlx::query_scalar("SELECT document FROM skills WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(Error::NotFound)?;
+        Ok(serde_json::from_str(&document)?)
     }
 
-    pub(crate) async fn skill_versions(&self, account: &str, id: &str) -> Result<Value> {
-        self.get_skill(account, id).await?;
-        let documents: Vec<String> = sqlx::query_scalar("SELECT document FROM skill_versions WHERE account_id=? AND skill_id=? ORDER BY json_extract(document,'$.created_at') DESC,version DESC")
-            .bind(account).bind(id).fetch_all(&self.pool).await?;
+    pub(crate) async fn skill_versions(&self, id: &str) -> Result<Value> {
+        self.get_skill(id).await?;
+        let documents: Vec<String> = sqlx::query_scalar("SELECT document FROM skill_versions WHERE skill_id=? ORDER BY json_extract(document,'$.created_at') DESC,version DESC")
+            .bind(id).fetch_all(&self.pool).await?;
         Ok(json!(
             documents
                 .into_iter()
@@ -355,18 +285,12 @@ impl Store {
         ))
     }
 
-    pub(crate) async fn skill_version(
-        &self,
-        account: &str,
-        id: &str,
-        version: &str,
-    ) -> Result<Value> {
-        self.get_skill(account, id).await?;
+    pub(crate) async fn skill_version(&self, id: &str, version: &str) -> Result<Value> {
+        self.get_skill(id).await?;
         stable_version(version)?;
         let document: String = sqlx::query_scalar(
-            "SELECT document FROM skill_versions WHERE account_id=? AND skill_id=? AND version=?",
+            "SELECT document FROM skill_versions WHERE skill_id=? AND version=?",
         )
-        .bind(account)
         .bind(id)
         .bind(version)
         .fetch_optional(&self.pool)
@@ -375,15 +299,9 @@ impl Store {
         Ok(serde_json::from_str(&document)?)
     }
 
-    pub(crate) async fn save_skill(
-        &self,
-        account: &str,
-        id: Option<&str>,
-        input: Value,
-    ) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn save_skill(&self, id: Option<&str>, input: Value) -> Result<Value> {
         let previous = match id {
-            Some(id) => Some(self.get_skill(account, id).await?),
+            Some(id) => Some(self.get_skill(id).await?),
             None => None,
         };
         if previous
@@ -440,45 +358,44 @@ impl Store {
             .and_then(Value::as_bool)
             .ok_or(Error::Invalid("技能启停状态无效"))?;
         let document = json!({
-            "id": id, "account_id": account, "name": name, "description": description, "prompt": prompt,
-            "files": files, "version": version, "enabled": enabled, "source": "user", "published": false,
-            "published_version": "", "market_locked": false, "market_lock_reason": "", "available": enabled,
+            "id": id, "name": name, "description": description, "prompt": prompt,
+            "files": files, "version": version, "enabled": enabled, "source": "user", "available": enabled,
             "created_at": previous.as_ref().map(|item| item["created_at"].clone()).unwrap_or_else(|| json!(now)), "updated_at": now,
         });
         let mut saved_version = document.clone();
         saved_version["created_at"] = json!(now);
         saved_version["notes"] = json!(notes);
-        saved_version["created_by"] = json!(account);
-        saved_version["created_by_type"] = json!("studio_user");
         let mut transaction = self.pool.begin().await?;
         if let Some(previous) = &previous {
-            let changed = sqlx::query("UPDATE skills SET document=? WHERE account_id=? AND id=? AND json_extract(document,'$.updated_at')=?")
-                .bind(document.to_string()).bind(account).bind(&id).bind(text(previous, "updated_at")?).execute(&mut *transaction).await?;
+            let changed = sqlx::query("UPDATE skills SET document=? WHERE id=? AND json_extract(document,'$.updated_at')=?")
+                .bind(document.to_string()).bind(&id).bind(text(previous, "updated_at")?).execute(&mut *transaction).await?;
             if changed.rows_affected() != 1 {
                 return Err(Error::Invalid("技能已更新，请重新读取"));
             }
         } else {
-            sqlx::query("INSERT INTO skills(account_id,id,source,document) VALUES(?,?,'user',?)")
-                .bind(account)
+            sqlx::query("INSERT INTO skills(id,source,document) VALUES(?,'user',?)")
                 .bind(&id)
                 .bind(document.to_string())
                 .execute(&mut *transaction)
                 .await?;
         }
-        sqlx::query("INSERT INTO skill_versions(account_id,skill_id,version,document,content_digest) VALUES(?,?,?,?,?)")
-            .bind(account).bind(&id).bind(version).bind(saved_version.to_string()).bind(digest(&serde_json::to_vec(&json!({ "name": name, "description": description, "prompt": prompt, "files": files }))?))
-            .execute(&mut *transaction).await?;
+        sqlx::query(
+            "INSERT INTO skill_versions(skill_id,version,document,content_digest) VALUES(?,?,?,?)",
+        )
+        .bind(&id)
+        .bind(version)
+        .bind(saved_version.to_string())
+        .bind(digest(&serde_json::to_vec(
+            &json!({ "name": name, "description": description, "prompt": prompt, "files": files }),
+        )?))
+        .execute(&mut *transaction)
+        .await?;
         transaction.commit().await?;
-        self.get_skill(account, &id).await
+        self.get_skill(&id).await
     }
 
-    pub(crate) async fn set_skill_enabled(
-        &self,
-        account: &str,
-        id: &str,
-        enabled: bool,
-    ) -> Result<Value> {
-        let mut document = self.get_skill(account, id).await?;
+    pub(crate) async fn set_skill_enabled(&self, id: &str, enabled: bool) -> Result<Value> {
+        let mut document = self.get_skill(id).await?;
         if document["source"] != "user" {
             return Err(Error::Invalid("官方技能版本只允许读取"));
         }
@@ -486,8 +403,14 @@ impl Store {
         document["enabled"] = json!(enabled);
         document["available"] = json!(enabled);
         document["updated_at"] = json!(timestamp()?);
-        let changed = sqlx::query("UPDATE skills SET document=? WHERE account_id=? AND id=? AND json_extract(document,'$.updated_at')=?")
-            .bind(document.to_string()).bind(account).bind(id).bind(previous_updated_at).execute(&self.pool).await?;
+        let changed = sqlx::query(
+            "UPDATE skills SET document=? WHERE id=? AND json_extract(document,'$.updated_at')=?",
+        )
+        .bind(document.to_string())
+        .bind(id)
+        .bind(previous_updated_at)
+        .execute(&self.pool)
+        .await?;
         if changed.rows_affected() != 1 {
             return Err(Error::Invalid("技能已更新，请重新读取"));
         }

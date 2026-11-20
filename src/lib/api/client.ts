@@ -20,23 +20,6 @@ export function baseURL(): string {
   return ''
 }
 
-export function sessionToken(): string {
-  try {
-    return sessionStorage.getItem('pixoma_admin_token') || ''
-  } catch {
-    return ''
-  }
-}
-
-export function setSessionToken(token: string | null): void {
-  try {
-    if (token) sessionStorage.setItem('pixoma_admin_token', token)
-    else sessionStorage.removeItem('pixoma_admin_token')
-  } catch {
-    // ignore
-  }
-}
-
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit

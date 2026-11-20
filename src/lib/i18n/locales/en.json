@@ -1,5 +1,6 @@
 {
   "agentAssets": {
+    "catalogTitle": "Skills & experts",
     "source": "Source", "expertProgress": "Expert steps", "confirm": "Confirm", "reject": "Reject", "submit": "Submit", "cancelTest": "Cancel test",
     "runStatuses": { "pending": "Pending", "queued": "Queued", "running": "Running", "waiting_approval": "Waiting for confirmation", "waiting_clarification": "Waiting for input", "waiting_workflow": "Waiting for workflow", "succeeded": "Finished", "failed": "Failed", "cancelled": "Cancelled" },
     "avatar": "Avatar", "uploadAvatar": "Upload avatar", "avatarFailed": "Avatar save failed", "sop": "Execution steps",
@@ -18,13 +19,13 @@
     "skills": "Skills",
     "mcp": "External MCP services",
     "settings": "Settings",
-    "sessions": "Session management",
-    "clear": "Clear my sessions",
+    "sessions": "Sessions",
+    "clear": "Clear all chats",
     "clearing": "Clearing…",
-    "cleared": "Your sessions have been cleared",
+    "cleared": "All chats have been cleared",
     "empty": "No sessions",
     "confirmLabel": "Enter 确认清空",
-    "clearDescription": "All sessions, messages and run records for your account will be cleared, and running Agents will stop. Library assets are retained. This action cannot be undone."
+    "clearDescription": "All local chats, messages and run records will be cleared, and running Agents will stop. Library assets are retained. This action cannot be undone."
   },
   "workflowMarket": {
     "title": "Workflow market",

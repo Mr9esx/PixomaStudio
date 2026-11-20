@@ -1,9 +1,10 @@
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState, type ReactNode } from 'react'
 import {
   Boxes,
   Cable,
   Check,
   ChevronDown,
+  MoreHorizontal,
   ShieldCheck,
   TriangleAlert,
   Workflow,
@@ -39,7 +40,41 @@ import {
   PopoverContent,
   PopoverTrigger,
 } from '@/components/ui/popover'
-import { PromptInputButton } from '@/components/ai-elements/prompt-input'
+import { PromptInputButton, PromptInputFooter, PromptInputTools } from '@/components/ai-elements/prompt-input'
+import { retainStudioComposerFocus } from './studio-composer-focus'
+
+export function StudioComposerFooter({ tools, permission, children }: { tools: ReactNode; permission: ReactNode; children: ReactNode }) {
+  const footerRef = useRef<HTMLDivElement>(null)
+  const [compact, setCompact] = useState(true)
+
+  useLayoutEffect(() => {
+    const footer = footerRef.current!
+    const observer = new ResizeObserver(([entry]) => setCompact(entry.borderBoxSize[0].inlineSize < 400))
+    observer.observe(footer.closest('[data-slot="input-group"]')!, { box: 'border-box' })
+    return () => observer.disconnect()
+  }, [])
+
+  return (
+    <PromptInputFooter ref={footerRef} className='flex-nowrap'>
+      <PromptInputTools className='shrink-0'>
+        {compact ? (
+          <Popover>
+            <PopoverTrigger asChild>
+              <PromptInputButton aria-label='更多输入操作' tooltip='更多输入操作' size='icon-sm'>
+                <MoreHorizontal />
+              </PromptInputButton>
+            </PopoverTrigger>
+            <PopoverContent aria-label='输入工具' align='start' side='top' className='w-auto p-2' onCloseAutoFocus={retainStudioComposerFocus}>
+              <PromptInputTools>{tools}</PromptInputTools>
+            </PopoverContent>
+          </Popover>
+        ) : <PromptInputTools>{tools}</PromptInputTools>}
+        {permission}
+      </PromptInputTools>
+      <PromptInputTools className='min-w-0 flex-1 justify-end'>{children}</PromptInputTools>
+    </PromptInputFooter>
+  )
+}
 
 export function ModelPicker({
   models,
@@ -68,7 +103,7 @@ export function ModelPicker({
         <PromptInputButton
           disabled={disabled}
           aria-label={`选择模型：${selected?.name ?? '未选择模型'}`}
-          className='max-w-52 font-normal'
+          className='min-w-0 max-w-52 shrink font-normal'
         >
           <span className='truncate'>{selected?.name ?? '未选择模型'}</span>
           <ChevronDown className='size-3.5' />

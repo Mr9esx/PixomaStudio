@@ -1,6 +1,6 @@
 # 开发验证记录
 
-日期：2026-10-22。
+日期：2026-10-29。
 
 工程目录：`/Users/mr9esx/Documents/PixomaStudio`。
 
@@ -17,9 +17,8 @@
 - FFmpeg 9.0.2 官方源码签名及固定 SHA-256 检查通过，程序仅链接系统组件，安装包配置保存程序、许可证、源码和构建参数。程序的 macOS 最低系统版本为 11.0，已经通过 Mach-O 元数据检查。
 - 文件上传保留文件修改日期，导出使用选定版本，ZIP 文件通过实际解压读取验证。
 - 本地媒体协议检查账号和资产版本，支持 GET、HEAD 和 Range。
-- 流程图保存节点、连线、顺序和位置；批量位置更新使用事务，删除节点同时删除相关连线。
-- API Key 使用 macOS 系统凭据存储，返回数据和 SQLite 配置不包含密钥。测试已执行真实凭据写入、读取和删除。
-- 模型保存、运行配置保存和会话清理共用并发保护；真实凭据检查覆盖并发密钥更新、保留密钥的配置更新，以及排队运行使用的密钥。清空会话同时清理普通运行和官方专家会话保留的旧凭据，当前模型凭据继续保留。
+- 模型 API Key 和 MCP 凭据直接保存在应用 SQLite 的模型与连接记录中，设置响应隐藏凭据内容。真实数据库测试验证保存、重新打开、账号隔离与数据目录隔离。
+- 模型保存、运行配置保存和会话清理共用并发保护；测试覆盖并发密钥更新、保留密钥的配置更新，以及排队运行保存的密钥。清空会话删除对应运行与配置记录，当前模型设置继续保留。
 - 排队运行、普通模型请求和上下文压缩请求检查当前模型的启停与 Agent 权限；停用后不建立新的请求记录。
 - Rig 的 Responses、Chat Completions 和 Anthropic Messages 均通过真实模型的连续对话、工具创建、审批恢复、指定版本资料读取和上下文压缩检查。
 - rmcp 承担 MCP 协议协商、初始化与工具发现；2026 协议通过逐次请求的 metadata 传递客户端能力，2025 协议通过 initialize 建立会话。关闭会话失效后的请求重发。
@@ -42,7 +41,7 @@
 - `load_skill` 读取本次运行保存的技能文件，并提供 Unicode 字符位置和目录分页；真实模型已验证指定文件读取，以及修改、停用和重新打开数据库后的版本保持。
 - 官方技能保存在独立数据库中，记录来源地址、版本和内容摘要；真实平台验证重复获取与只读保护。
 - 个人专家保存内容、SOP 和历史版本；会话绑定指定专家版本与本地模型，真实模型验证版本读取、数据库重新打开、连续消息及版本更换检查。
-- 官方专家会话保存创建时本地默认模型的完整配置和凭据引用。真实平台与模型验证修改原模型的地址、名称、限制和密钥之后，原会话继续使用原配置，新会话使用当前默认配置；清空会话清理不再引用的旧密钥。
+- 官方专家会话保存创建时本地默认模型的完整配置。修改原模型的地址、名称、限制和密钥之后，原会话继续使用原配置，新会话使用当前默认配置。
 - 专家任务与步骤保存实际处理记录；输入和结果卡片支持开始、暂缓、跳过、确认与修改。并发相同答复只创建一个运行；错误账号、缺失必填输入和过期卡片被拒绝。
 - 专家卡片的真实模型检查覆盖文档创建、版本修改、结果资产引用，以及重新打开数据库后的卡片答复。文档新版本和会话使用记录在同一个事务保存。
 - 专家会话中的技能列表显示绑定版本；编辑器可以引用个人技能。头像通过二进制 IPC 上传，校验实际图片内容和 5 MiB 限制；本地头像按专家版本读取，平台头像经已认证的 Rust Client 读取。
@@ -57,7 +56,7 @@
 - 账号变化关闭旧订阅并等待原账号的运行结束；前端清除旧账号业务缓存，重新创建页面状态。同一账号的资料更新保留当前业务缓存。
 - 清空会话要求确认文字，停止当前账号的运行；保留项目、资产文件、版本、项目资产和使用记录，已经清空的会话标记为不可打开。
 - 桌面进程已启动；再次启动 App 会激活已有窗口，第二个进程正常退出。
-- 使用独立测试平台完成注册、登录、身份读取、资料修改、密码修改、退出和系统凭据中的登录状态恢复。
+- 使用独立测试平台完成注册、登录、身份读取、资料修改、密码修改和退出。真实 SQLite 检查验证登录 Cookie 保存、重新打开后的恢复、平台地址隔离和退出清理。
 - 使用真实模型完成流式回复和连续对话；第二次运行读取前一次运行的持久检查点，返回相同的对话编号。
 - 模型地址支持基础地址与完整操作路径，保留代理服务的路径前缀。
 - 关闭思考时通过对应协议明确传递关闭设置。DeepSeek Chat 保留 `thinking` 与 `reasoning_content`，启用图片能力时使用 Rig 兼容协议扩展；Agent 与压缩请求分别保留其思考设置。原生窗口确认关闭思考时实际回复不包含思考内容。
@@ -82,7 +81,7 @@
 | 检查 | 当前结果 |
 | --- | --- |
 | `pnpm typecheck` | 通过 |
-| `pnpm test` | 5 项通过 |
+| `pnpm test --maxWorkers=1 --no-file-parallelism` | 6 项通过 |
 | `pnpm build` | 通过，包含构建文件大小提示 |
 | `cargo check --manifest-path src-tauri/Cargo.toml --all-targets` | 通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml` | 55 项通过，24 项真实服务检查单独执行 |
@@ -109,12 +108,12 @@
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration skills::` | 2 项实际 SQLite 与 ZIP 检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration skills::real_model -- --ignored` | Chat 协议真实文件读取、版本绑定与恢复检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration experts:: -- --ignored` | 真实专家版本、模型绑定、步骤卡片和文档版本检查通过 |
-| `cargo test --manifest-path src-tauri/Cargo.toml --test integration platform::official_experts -- --ignored` | 真实官方专家获取、完整模型配置保存、连续会话和旧凭据清理通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test integration platform::official_experts -- --ignored` | 真实官方专家获取、完整模型配置保存和连续会话通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib platform::tests::real_published -- --ignored` | 真实平台头像上传、发布和鉴权读取通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib platform::publications_tests:: -- --ignored` | 真实个人技能和专家发布、撤销发布、发布历史、并发重复请求、版本递增、历史版本发布、数据库重新打开、模型与技能标识转换、头像原始字节通过。实际 SQLite 触发器验证平台创建成功后的本地关联保存中断，以及平台撤销发布成功后的本地结果保存中断；恢复没有重复创建对象或发布记录。纯文本首尾空白、完整技能包、二进制文件和专家空名称引用检查通过，本地版本保留原文 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib platform::tests::real_workflow_catalog -- --ignored` | 真实目录版本、专家引用准备、会话上下文、账号隔离及 MCP 依赖状态通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration workflows::real_workflow_missing_inputs -- --ignored` | 真实输入等待、重新打开数据库、校验、重复跳过和审批策略变化后的参数保留通过 |
-| `cargo test --manifest-path src-tauri/Cargo.toml --test integration workflows::real_workflow_executes -- --ignored` | 真实图片字节、MCP 提交、连续重启后的原任务恢复、两个结果的像素、资产、流程图、取消后继续对话、并发刷新、专家结果确认及计算失败状态通过。真实任务提交后以 SQLite 触发器阻止任务编号保存，结果未知、任务候选、账号范围、重复核对及拒绝重新执行通过 |
+| `cargo test --manifest-path src-tauri/Cargo.toml --test integration workflows::real_workflow_executes -- --ignored` | 真实图片字节、MCP 提交、连续重启后的原任务恢复、两个结果的像素、资产、取消后继续对话、并发刷新、专家结果确认及计算失败状态通过。真实任务提交后以 SQLite 触发器阻止任务编号保存，结果未知、任务候选、账号范围、重复核对及拒绝重新执行通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --lib workflow_execution::tests::workflow_outputs` | 实际 JSON、文本与二进制文件按 MIME 和字节类型保存，原始内容保持一致；无效 MIME 被拒绝 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration assets::image_palettes` | 实际双色图片的 75%/25% 比例、纯白图片、重新分析、账号范围、原始字节与数据库重新打开检查通过 |
 | `cargo test --manifest-path src-tauri/Cargo.toml --test integration assets::reopening_cleans` | 写入中断后的内容文件、未完成文件、普通文件保留、所有历史版本及启动清理与保存并发检查通过 |
@@ -147,11 +146,11 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" pnpm tauri dev --no-watch
 
 ## 真实联调环境
 
-平台地址为 `http://127.0.0.1:18082`，使用专用测试数据目录与测试账号。模型使用本机已有的 DeepSeek V4.1 Flash 配置，通过 Rig 的 Chat Completions、Responses 和 Anthropic Messages 协议发送真实请求。凭据仅在本机进程内读取，并由 App 保存到系统凭据存储；文档与普通数据库配置不包含凭据。
+平台地址为 `http://127.0.0.1:18082`，使用专用测试数据目录与测试账号。模型使用本机已有的 DeepSeek V4.1 Flash 配置，通过 Rig 的 Chat Completions、Responses 和 Anthropic Messages 协议发送真实请求。App 从应用数据库的模型和连接记录中读取凭据；文档与检查输出不包含凭据。
 
 真实服务检查明确标记为 `ignored`，通过环境变量 `PIXOMA_TEST_PLATFORM_URL`、`PIXOMA_TEST_MODEL_CONFIG`、`PIXOMA_TEST_MCP_URL` 和 `PIXOMA_TEST_MCP_TOKEN` 单独执行。原生窗口联调使用同一套 App Builder、Commands、前端 API 和 AG-UI Adapter；测试账号由测试平台的管理接口创建，使用 `PIXOMA_TEST_STUDIO_USERNAME` 和 `PIXOMA_TEST_STUDIO_PASSWORD` 登录并修改初始密码。
 
-原生重新启动检查使用 `PIXOMA_STUDIO_DATA_DIR` 指定独立测试目录，保存不含密钥的检查记录。创建阶段保存实际资料摘要并在工具审批时退出；恢复阶段读取同一目录，通过系统凭据存储恢复账号和模型配置。父进程只接受带有本次启动编号和阶段名称的成功结果，同时验证目录锁占用与已有结果隔离。检查结束后，辅助命令删除专用账号与本次模型、MCP 凭据。
+原生重新启动检查使用 `PIXOMA_STUDIO_DATA_DIR` 指定独立测试目录，保存不含密钥的检查记录。创建阶段保存实际资料摘要并在工具审批时退出；恢复阶段读取同一目录的 SQLite 数据库，恢复账号和模型配置。父进程只接受带有本次启动编号和阶段名称的成功结果，同时验证目录锁占用与已有结果隔离。检查结束后删除专用账号与测试目录。
 
 官方专家和工作流目录检查使用管理接口创建的专用账号，并在检查结束后删除账号和本次 MCP 凭据。平台注册流程使用独立检查覆盖。
 
@@ -169,17 +168,25 @@ sandbox-exec -p '(version 1) (allow default) (deny file-read* (subpath "/Users/m
 
 相同限制下执行 `pnpm install --frozen-lockfile` 通过。Rust 发布编译耗时 1 分 41 秒，应用及 DMG 均正常生成；新应用与随包 FFmpeg 的签名完整性检查通过。
 
+## 桌面窗口与页面布局检查
+
+2026-10-29 使用 `native_layout` 原生检查程序、独立平台、真实注册账号和实际 SQLite 会话完成检查。检查程序使用独立应用标识与数据目录。
+
+1440px 与 760px 两种窗口宽度下，新对话、已有对话、资产库、工作流市场、技能市场、专家市场、模型设置、技能设置、MCP 设置、账号设置、会话管理和独立专家编辑页共 24 项页面测量均通过。主体上下及右侧间距为 16px，圆角、边框、底色一致，没有横向溢出；页面顶部均为 64px。
+
+窄窗口菜单的打开、关闭和品牌位置检查通过。双击页面顶部后，Tauri `is_maximized` 返回 `true`；再次双击后返回 `false`，窗口恢复为原来的 760 × 800 尺寸。两次完整原生检查的退出码均为 0。
+
 ## 当前安装包
 
-当前安装包包含 MCP 协议、取消正文恢复和模型缓存刷新。发布编译耗时 7 分 20 秒，命令退出码为 0，生成 77.57 MiB 的应用与 37.49 MiB 的 DMG。版本为 `0.1.0`，默认平台地址为 `http://127.0.0.1:30808`，目标为 macOS ARM64，最低系统版本声明为 11.0，使用 ad-hoc 签名。
+当前安装包统一页面主体的外边距、圆角、边框、底色和顶部高度。macOS 使用融合内容的原生窗口按钮，隐藏标题文字；页面顶部与窗口上沿支持拖动，页面顶部保留双击缩放行为。版本为 `0.1.0`，默认平台地址为 `http://127.0.0.1:30808`，目标为 macOS ARM64，最低系统版本声明为 11.0，使用 ad-hoc 签名。发布构建成功，生成 77.51 MiB 的应用与 37.44 MiB 的 DMG。
 
-DMG 位于 `artifacts/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `20abcb50bcedc7e5eddf6ce6b9898978ecdd3d7d48ee31723bb992799d1742e2`，主程序 SHA-256 为 `fb9fed7cb39ad5950a2e96de92acd08a2694191e2b7fc083d095d5f9f95131a3`。应用和随包 FFmpeg 的严格签名检查、保存后的 DMG 全部校验和均通过。当前前端 6 项行为检查、类型检查和构建通过。
+DMG 位于 `artifacts/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `6b2aa3ab3a0266fe7b02166802f56a0f9993e790ba7d32514c25a5c6a2f2a12d`，安装包内主程序 SHA-256 为 `79db731dde830b7899da25841b8a6e3bc586049bd5d691df143d96808208e16e`。应用的严格签名检查、DMG 校验和及交付文件的 SHA-256 比较均通过。当前前端 6 项行为检查、类型检查、构建和 Rust 格式检查通过。
 
-不设置 `PIXOMA_PLATFORM_URL`，从本次镜像启动应用后，独立目录中的 `config/desktop.json` 保存内置地址 `http://127.0.0.1:30808`，SQLite 的 `quick_check` 通过。实际平台收到未登录身份查询并返回 HTTP 401，原生窗口显示登录页面，应用菜单包含模型、技能和 MCP 设置。最新包的登录提交和模型即时刷新未取得完整页面证据，保留待验证状态。
+打包使用已通过原生复查的前端资源，运行 `cargo build --manifest-path src-tauri/Cargo.toml --release --locked --features tauri/custom-protocol --bin pixoma-studio` 生成主程序，再运行 `CI=true pnpm tauri bundle --ci --bundles app,dmg` 生成应用和镜像。编译时设置 `PIXOMA_PLATFORM_URL=http://127.0.0.1:30808`。
 
-交付检查结束后停止本轮应用和隔离平台，退出镜像挂载，执行 Cargo 清理并删除前端依赖、构建目录、临时凭据文档、诊断文件和独立测试数据。`src-tauri/target/`、`node_modules/`、`dist/` 均不存在，`.local-cache/` 为空；`artifacts/` 只保留当前一份 DMG。
+原生检查使用 `src-tauri/examples/native_layout.rs` 和 `native_layout.js`，通过真实 Tauri 窗口、独立平台和 SQLite 读取页面结构与尺寸。页面尺寸、菜单和双击缩放的验证范围以本文件中的对应检查记录为准。
 
-此前 MCP 安装副本已验证账号、项目、会话、文档第二版本和引用记录恢复，页面验收按清单记录状态。测试完成后清理编译缓存、测试安装副本、独立测试数据及测试服务环境；本节以外的测试路径仅记录当时操作。当前仅保留 `artifacts/` 中的一份安装包。
+本轮独立检查使用的进程和数据已清理。`18082` 平台服务及其数据供当前打开的 Studio 应用继续使用；共享构建目录、前端依赖和开发资源供正在进行的开发任务继续使用。`artifacts/` 仅保留当前一份 DMG。
 
 ## 安装包项目与技能页面检查
 
@@ -203,7 +210,7 @@ DMG 位于 `artifacts/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `20abcb50bc
 
 在隔离平台通过管理接口创建 30 分钟有效的专用 MCP 凭据，从原生菜单新建 `平台 MCP 页面检查`，地址为 `http://127.0.0.1:18083/mcp`。保存前和保存后的工具发现均取得 `get_task`、`get_workflow`、`list_tasks`、`list_workflows`、`run_workflow` 五个真实工具；页面保存凭据掩码、请求确认策略和工具数量。停用后显示已停用，重新启用后显示配置正常、已启用。
 
-原生菜单退出应用后，原应用进程退出码为 0。页面检查结束时停止本轮应用和隔离平台，退出 DMG 挂载，删除独立测试数据、ZIP、音频文件、辅助脚本和专用系统凭据；保留源码、验证资料和 `artifacts/` 中的一份安装包。
+原生菜单退出应用后，原应用进程退出码为 0。页面检查结束时停止本轮应用和隔离平台，退出 DMG 挂载，删除独立测试数据、ZIP、音频文件和辅助脚本；保留源码、验证资料和 `artifacts/` 中的一份安装包。
 
 ## 安装包资产分页检查
 
@@ -253,7 +260,7 @@ DMG 位于 `artifacts/Pixoma Studio_0.1.0_aarch64.dmg`，SHA-256 为 `20abcb50bc
 
 单项导出通过原生保存对话框选择 `.local-cache/bundle-ui-20261021`，生成 `安装包文稿检查.md`；再次导出后取消保存，正常返回原详情。实际导出文件与原资产内容通过 `cmp` 比较一致。批量选择文档和视频后导出 `assets.zip`，标准库 `zipfile` 读取中文文件名并解压成功；其中 `001-red.mp4` 与 `002-安装包文稿检查.md` 分别与原视频、单项导出文档通过 `cmp` 比较一致。
 
-页面操作结束后，通过应用退出操作正常结束原安装副本，退出码为 0。随后启动 `bundle-final.CFap2e` 安装副本，实际打开同一数据库；完成系统钥匙串授权后恢复账号与原项目。
+页面操作结束后，通过应用退出操作正常结束原安装副本，退出码为 0。随后启动 `bundle-final.CFap2e` 安装副本，实际打开同一数据库并读取原项目。
 
 ## 安装包对话页面检查
 

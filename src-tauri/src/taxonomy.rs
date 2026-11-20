@@ -31,28 +31,21 @@ pub(crate) fn check_tree_mode(mode: &str) -> Result<()> {
 }
 
 impl Store {
-    pub(crate) async fn category(&self, account: &str, id: &str) -> Result<Category> {
-        Self::check_account(account)?;
-        sqlx::query_as("SELECT id,coalesce(project_id,'') AS project_id,coalesce(parent_id,'') AS parent_id,name,created_at,updated_at FROM categories WHERE account_id=? AND id=?")
-            .bind(account).bind(id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)
+    pub(crate) async fn category(&self, id: &str) -> Result<Category> {
+        sqlx::query_as("SELECT id,coalesce(project_id,'') AS project_id,coalesce(parent_id,'') AS parent_id,name,created_at,updated_at FROM categories WHERE id=?")
+            .bind(id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)
     }
 
-    pub(crate) async fn categories(&self, account: &str, project: &str) -> Result<Vec<Category>> {
-        Self::check_account(account)?;
+    pub(crate) async fn categories(&self, project: &str) -> Result<Vec<Category>> {
         if !project.is_empty() {
-            self.get_project(account, project).await?;
+            self.get_project(project).await?;
         }
-        Ok(sqlx::query_as("SELECT id,coalesce(project_id,'') AS project_id,coalesce(parent_id,'') AS parent_id,name,created_at,updated_at FROM categories WHERE account_id=? AND coalesce(project_id,'')=? ORDER BY name,id")
-            .bind(account).bind(project).fetch_all(&self.pool).await?)
+        Ok(sqlx::query_as("SELECT id,coalesce(project_id,'') AS project_id,coalesce(parent_id,'') AS parent_id,name,created_at,updated_at FROM categories WHERE coalesce(project_id,'')=? ORDER BY name,id")
+            .bind(project).fetch_all(&self.pool).await?)
     }
 
-    pub(crate) async fn update_category(
-        &self,
-        account: &str,
-        id: &str,
-        patch: &Value,
-    ) -> Result<Value> {
-        let category = self.category(account, id).await?;
+    pub(crate) async fn update_category(&self, id: &str, patch: &Value) -> Result<Value> {
+        let category = self.category(id).await?;
         let fields = patch.as_object().ok_or(Error::Invalid("分类参数无效"))?;
         if fields
             .keys()
@@ -76,56 +69,58 @@ impl Store {
         };
         let mut transaction = self.pool.begin().await?;
         if !parent.is_empty() {
-            let exists: i64 = sqlx::query_scalar("SELECT count(*) FROM categories WHERE account_id=? AND coalesce(project_id,'')=? AND id=?")
-                .bind(account).bind(&category.project_id).bind(parent).fetch_one(&mut *transaction).await?;
+            let exists: i64 = sqlx::query_scalar(
+                "SELECT count(*) FROM categories WHERE coalesce(project_id,'')=? AND id=?",
+            )
+            .bind(&category.project_id)
+            .bind(parent)
+            .fetch_one(&mut *transaction)
+            .await?;
             if exists != 1 {
                 return Err(Error::NotFound);
             }
-            let cycle: i64 = sqlx::query_scalar("WITH RECURSIVE descendants(id) AS (SELECT id FROM categories WHERE account_id=? AND id=? UNION SELECT c.id FROM categories c JOIN descendants d ON c.parent_id=d.id WHERE c.account_id=?) SELECT count(*) FROM descendants WHERE id=?")
-                .bind(account).bind(id).bind(account).bind(parent).fetch_one(&mut *transaction).await?;
+            let cycle: i64 = sqlx::query_scalar("WITH RECURSIVE descendants(id) AS (SELECT id FROM categories WHERE id=? UNION SELECT c.id FROM categories c JOIN descendants d ON c.parent_id=d.id) SELECT count(*) FROM descendants WHERE id=?")
+                .bind(id).bind(parent).fetch_one(&mut *transaction).await?;
             if cycle != 0 {
                 return Err(Error::Invalid("分类不能移到自身或下级分类"));
             }
         }
-        sqlx::query(
-            "UPDATE categories SET name=?,parent_id=?,updated_at=? WHERE account_id=? AND id=?",
-        )
-        .bind(name.trim())
-        .bind(if parent.is_empty() {
-            None
-        } else {
-            Some(parent)
-        })
-        .bind(timestamp()?)
-        .bind(account)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
+        sqlx::query("UPDATE categories SET name=?,parent_id=?,updated_at=? WHERE id=?")
+            .bind(name.trim())
+            .bind(if parent.is_empty() {
+                None
+            } else {
+                Some(parent)
+            })
+            .bind(timestamp()?)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
         transaction.commit().await?;
-        Ok(serde_json::to_value(self.category(account, id).await?)?)
+        Ok(serde_json::to_value(self.category(id).await?)?)
     }
 
-    pub(crate) async fn delete_category(&self, account: &str, id: &str) -> Result<()> {
-        let category = self.category(account, id).await?;
+    pub(crate) async fn delete_category(&self, id: &str) -> Result<()> {
+        let category = self.category(id).await?;
         let parent = if category.parent_id.is_empty() {
             None
         } else {
             Some(category.parent_id.as_str())
         };
         let mut transaction = self.pool.begin().await?;
-        sqlx::query(
-            "UPDATE categories SET parent_id=?,updated_at=? WHERE account_id=? AND parent_id=?",
-        )
-        .bind(parent)
-        .bind(timestamp()?)
-        .bind(account)
-        .bind(id)
-        .execute(&mut *transaction)
-        .await?;
-        sqlx::query("UPDATE project_assets SET category_id=?,updated_at=? WHERE account_id=? AND category_id=?")
-            .bind(parent).bind(timestamp()?).bind(account).bind(id).execute(&mut *transaction).await?;
-        sqlx::query("DELETE FROM categories WHERE account_id=? AND id=?")
-            .bind(account)
+        sqlx::query("UPDATE categories SET parent_id=?,updated_at=? WHERE parent_id=?")
+            .bind(parent)
+            .bind(timestamp()?)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE project_assets SET category_id=?,updated_at=? WHERE category_id=?")
+            .bind(parent)
+            .bind(timestamp()?)
+            .bind(id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("DELETE FROM categories WHERE id=?")
             .bind(id)
             .execute(&mut *transaction)
             .await?;
@@ -133,11 +128,9 @@ impl Store {
         Ok(())
     }
 
-    pub(crate) async fn tags(&self, account: &str) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn tags(&self) -> Result<Value> {
         let rows: Vec<(String, String)> =
-            sqlx::query_as("SELECT id,name FROM tags WHERE account_id=? ORDER BY name,id")
-                .bind(account)
+            sqlx::query_as("SELECT id,name FROM tags ORDER BY name,id")
                 .fetch_all(&self.pool)
                 .await?;
         Ok(json!(
@@ -147,11 +140,9 @@ impl Store {
         ))
     }
 
-    pub(crate) async fn library_preferences(&self, account: &str) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn library_preferences(&self) -> Result<Value> {
         let document: Option<String> =
-            sqlx::query_scalar("SELECT document FROM preferences WHERE account_id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT document FROM preferences WHERE id=1")
                 .fetch_optional(&self.pool)
                 .await?;
         match document {
@@ -160,21 +151,15 @@ impl Store {
         }
     }
 
-    pub(crate) async fn save_library_preferences(
-        &self,
-        account: &str,
-        document: Value,
-    ) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn save_library_preferences(&self, document: Value) -> Result<Value> {
         let preferences: LibraryPreferences = serde_json::from_value(document)?;
         check_tree_mode(&preferences.tree_mode)?;
         if !preferences.last_project_id.is_empty() {
-            self.get_project(account, &preferences.last_project_id)
-                .await?;
+            self.get_project(&preferences.last_project_id).await?;
         }
         let document = serde_json::to_value(preferences)?;
-        sqlx::query("INSERT INTO preferences(account_id,document) VALUES(?,?) ON CONFLICT(account_id) DO UPDATE SET document=excluded.document")
-            .bind(account).bind(document.to_string()).execute(&self.pool).await?;
+        sqlx::query("INSERT INTO preferences(id,document) VALUES(1,?) ON CONFLICT(id) DO UPDATE SET document=excluded.document")
+            .bind(document.to_string()).execute(&self.pool).await?;
         Ok(document)
     }
 }

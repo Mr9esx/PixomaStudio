@@ -16,7 +16,6 @@ use serde_json::{Value, json};
 impl Store {
     pub(crate) async fn execute_mcp_tool(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
@@ -25,8 +24,8 @@ impl Store {
         let ToolTarget::Mcp { name, .. } = &tool.target else {
             return Err(Error::State("MCP 工具配置无效"));
         };
-        let context = crate::mcp::McpCallContext::new(self.clone(), account, run, id, tool, call);
-        let mut saved = self.mcp_execution(account, run, id, tool, call).await?;
+        let context = crate::mcp::McpCallContext::new(self.clone(), run, id, tool, call);
+        let mut saved = self.mcp_execution(run, id, tool, call).await?;
         if saved.is_none() {
             match context
                 .call_tool(
@@ -37,17 +36,17 @@ impl Store {
             {
                 CallToolResponse::Complete(result) => {
                     if self
-                        .mcp_execution(account, run, id, tool, call)
+                        .mcp_execution(run, id, tool, call)
                         .await?
                         .is_some()
                     {
-                        self.save_mcp_completion(account, run, id, tool, call, &result)
+                        self.save_mcp_completion(run, id, tool, call, &result)
                             .await?;
                     }
                     return complete_result(result).map(Some);
                 }
                 CallToolResponse::Task(created) => {
-                    self.save_mcp_task(account, run, id, tool, call, &created)
+                    self.save_mcp_task(run, id, tool, call, &created)
                         .await
                         .map_err(|error| {
                             Error::ToolResultUnknown(format!(
@@ -55,15 +54,15 @@ impl Store {
                                 created.task.task_id
                             ))
                         })?;
-                    saved = self.mcp_execution(account, run, id, tool, call).await?;
+                    saved = self.mcp_execution(run, id, tool, call).await?;
                 }
                 CallToolResponse::InputRequired(input) => {
-                    self.save_mcp_inputs(account, run, id, tool, call, &McpInput::Mrtr(input))
+                    self.save_mcp_inputs(run, id, tool, call, &McpInput::Mrtr(input))
                         .await
                         .map_err(|error| {
                             Error::ToolResultUnknown(format!("MCP 继续状态无法保存：{error}"))
                         })?;
-                    saved = self.mcp_execution(account, run, id, tool, call).await?;
+                    saved = self.mcp_execution(run, id, tool, call).await?;
                 }
                 _ => {
                     return Err(Error::ToolResultUnknown(
@@ -84,20 +83,20 @@ impl Store {
                 "polling" => {}
                 "input_required" => {
                     if self
-                        .pause_for_mcp_input(account, run, id, tool, call)
+                        .pause_for_mcp_input(run, id, tool, call)
                         .await?
                     {
                         return Ok(None);
                     }
                     saved = self
-                        .mcp_execution(account, run, id, tool, call)
+                        .mcp_execution(run, id, tool, call)
                         .await?
                         .ok_or(Error::State("MCP 继续记录缺失"))?;
                     continue;
                 }
                 "ready" if saved["input"]["source"] == "mrtr" => {
                     let request = self
-                        .begin_mcp_continuation(account, run, id, tool, call)
+                        .begin_mcp_continuation(run, id, tool, call)
                         .await?;
                     if saved["input"]["requests"]
                         .as_object()
@@ -108,11 +107,11 @@ impl Store {
                     let response = context.call_tool(request).await?;
                     match response {
                         CallToolResponse::Complete(result) => {
-                            self.save_mcp_completion(account, run, id, tool, call, &result)
+                            self.save_mcp_completion(run, id, tool, call, &result)
                                 .await?
                         }
                         CallToolResponse::Task(created) => self
-                            .save_mcp_task(account, run, id, tool, call, &created)
+                            .save_mcp_task(run, id, tool, call, &created)
                             .await
                             .map_err(|error| {
                                 Error::ToolResultUnknown(format!(
@@ -121,7 +120,7 @@ impl Store {
                                 ))
                             })?,
                         CallToolResponse::InputRequired(input) => self
-                            .save_mcp_inputs(account, run, id, tool, call, &McpInput::Mrtr(input))
+                            .save_mcp_inputs(run, id, tool, call, &McpInput::Mrtr(input))
                             .await
                             .map_err(|error| {
                                 Error::ToolResultUnknown(format!("MCP 继续状态无法保存：{error}"))
@@ -133,7 +132,7 @@ impl Store {
                         }
                     }
                     saved = self
-                        .mcp_execution(account, run, id, tool, call)
+                        .mcp_execution(run, id, tool, call)
                         .await?
                         .ok_or(Error::State("MCP 继续记录缺失"))?;
                     continue;
@@ -144,7 +143,7 @@ impl Store {
                     context.update_task(&task.task_id, responses).await?;
                     saved["task_responses"] = saved["input"]["responses"].clone();
                     saved["status"] = json!("polling");
-                    self.update_mcp_execution(account, run, id, &saved).await?;
+                    self.update_mcp_execution(run, id, &saved).await?;
                 }
                 _ => return Err(Error::State("MCP 任务状态无效")),
             }
@@ -162,17 +161,17 @@ impl Store {
                 | TaskPayload::Completed { .. }
                 | TaskPayload::Failed { .. }
                 | TaskPayload::Cancelled => {
-                    self.save_mcp_task_result(account, run, id, tool, call, &result)
+                    self.save_mcp_task_result(run, id, tool, call, &result)
                         .await?;
                 }
                 TaskPayload::InputRequired { .. } => {
-                    self.save_mcp_inputs(account, run, id, tool, call, &McpInput::Task(result))
+                    self.save_mcp_inputs(run, id, tool, call, &McpInput::Task(result))
                         .await?
                 }
                 _ => return Err(Error::Invalid("MCP 任务返回了无法识别的状态")),
             }
             saved = self
-                .mcp_execution(account, run, id, tool, call)
+                .mcp_execution(run, id, tool, call)
                 .await?
                 .ok_or(Error::State("MCP 任务记录缺失"))?;
         }
@@ -180,13 +179,12 @@ impl Store {
 
     pub(crate) async fn update_mcp_execution(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         document: &Value,
     ) -> Result<()> {
-        let changed = sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=? AND EXISTS(SELECT 1 FROM tool_calls t JOIN runs r ON r.account_id=t.account_id AND r.id=t.run_id WHERE t.account_id=mcp_executions.account_id AND t.run_id=mcp_executions.run_id AND t.id=mcp_executions.id AND t.status IN ('executing','waiting_mcp') AND r.status='running')")
-            .bind(document.to_string()).bind(timestamp()?).bind(account).bind(run).bind(id).execute(&self.pool).await?;
+        let changed = sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=? AND EXISTS(SELECT 1 FROM tool_calls t JOIN runs r ON r.id=t.run_id WHERE t.run_id=mcp_executions.run_id AND t.id=mcp_executions.id AND t.status IN ('executing','waiting_mcp') AND r.status='running')")
+            .bind(document.to_string()).bind(timestamp()?).bind(run).bind(id).execute(&self.pool).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("MCP 执行记录无法保存"));
         }
@@ -195,7 +193,6 @@ impl Store {
 
     pub(crate) async fn begin_mcp_continuation(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
@@ -205,7 +202,7 @@ impl Store {
             return Err(Error::State("MCP 工具配置无效"));
         };
         let mut saved = self
-            .mcp_execution(account, run, id, tool, call)
+            .mcp_execution(run, id, tool, call)
             .await?
             .ok_or(Error::State("MCP 继续记录缺失"))?;
         if saved["status"] != "ready" || saved["input"]["source"] != "mrtr" {
@@ -220,21 +217,20 @@ impl Store {
             request = request.with_request_state(state);
         }
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let changed = sqlx::query("UPDATE tool_calls SET status='executing',updated_at=? WHERE account_id=? AND run_id=? AND id=? AND status='waiting_mcp' AND EXISTS(SELECT 1 FROM runs r WHERE r.account_id=tool_calls.account_id AND r.id=tool_calls.run_id AND r.status='running')")
-            .bind(timestamp()?).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE tool_calls SET status='executing',updated_at=? WHERE run_id=? AND id=? AND status='waiting_mcp' AND EXISTS(SELECT 1 FROM runs r WHERE r.id=tool_calls.run_id AND r.status='running')")
+            .bind(timestamp()?).bind(run).bind(id).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("MCP 继续请求已经发送或运行已经结束"));
         }
         saved["status"] = json!("continuing");
-        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=? AND json_extract(document,'$.status')='ready'")
-            .bind(saved.to_string()).bind(timestamp()?).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=? AND json_extract(document,'$.status')='ready'")
+            .bind(saved.to_string()).bind(timestamp()?).bind(run).bind(id).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(request)
     }
 
     pub(crate) async fn save_mcp_completion(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
@@ -242,36 +238,34 @@ impl Store {
         result: &CallToolResult,
     ) -> Result<()> {
         let mut saved = self
-            .mcp_execution(account, run, id, tool, call)
+            .mcp_execution(run, id, tool, call)
             .await?
             .ok_or(Error::State("MCP 继续记录缺失"))?;
         saved["status"] = json!("completed");
         saved["response"] = serde_json::to_value(result)?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let changed = sqlx::query("UPDATE tool_calls SET status='waiting_mcp',updated_at=? WHERE account_id=? AND run_id=? AND id=? AND status='executing' AND EXISTS(SELECT 1 FROM runs r WHERE r.account_id=tool_calls.account_id AND r.id=tool_calls.run_id AND r.status='running')")
-            .bind(timestamp()?).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE tool_calls SET status='waiting_mcp',updated_at=? WHERE run_id=? AND id=? AND status='executing' AND EXISTS(SELECT 1 FROM runs r WHERE r.id=tool_calls.run_id AND r.status='running')")
+            .bind(timestamp()?).bind(run).bind(id).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("MCP 工具无法保存结果"));
         }
-        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(saved.to_string()).bind(timestamp()?).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=?")
+            .bind(saved.to_string()).bind(timestamp()?).bind(run).bind(id).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(())
     }
 
     pub(crate) async fn mcp_execution(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
         call: &ToolCall,
     ) -> Result<Option<Value>> {
-        self.get_run(account, run).await?;
+        self.get_run(run).await?;
         let document: Option<String> = sqlx::query_scalar(
-            "SELECT document FROM mcp_executions WHERE account_id=? AND run_id=? AND id=?",
+            "SELECT document FROM mcp_executions WHERE run_id=? AND id=?",
         )
-        .bind(account)
         .bind(run)
         .bind(id)
         .fetch_optional(&self.pool)
@@ -289,14 +283,13 @@ impl Store {
 
     pub(crate) async fn save_mcp_task(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
         call: &ToolCall,
         created: &CreateTaskResult,
     ) -> Result<()> {
-        self.get_run(account, run).await?;
+        self.get_run(run).await?;
         let task = &created.task;
         if task.task_id.trim().is_empty() {
             return Err(Error::Invalid("MCP 任务编号为空"));
@@ -305,9 +298,8 @@ impl Store {
         let binding = digest(&serde_json::to_vec(&(tool, call))?);
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let previous: Option<String> = sqlx::query_scalar(
-            "SELECT document FROM mcp_executions WHERE account_id=? AND run_id=? AND id=?",
+            "SELECT document FROM mcp_executions WHERE run_id=? AND id=?",
         )
-        .bind(account)
         .bind(run)
         .bind(id)
         .fetch_optional(&mut *transaction)
@@ -325,23 +317,22 @@ impl Store {
         } else {
             json!({ "binding": binding })
         };
-        let changed = sqlx::query("UPDATE tool_calls SET status='waiting_mcp',updated_at=? WHERE account_id=? AND run_id=? AND id=? AND status IN ('executing','waiting_mcp') AND EXISTS(SELECT 1 FROM runs WHERE runs.account_id=tool_calls.account_id AND runs.id=tool_calls.run_id AND runs.status='running')")
-            .bind(&now).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE tool_calls SET status='waiting_mcp',updated_at=? WHERE run_id=? AND id=? AND status IN ('executing','waiting_mcp') AND EXISTS(SELECT 1 FROM runs WHERE runs.id=tool_calls.run_id AND runs.status='running')")
+            .bind(&now).bind(run).bind(id).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("工具调用无法等待 MCP 任务"));
         }
         document["status"] = json!("polling");
         document["task"] = serde_json::to_value(task)?;
         document["created_response"] = serde_json::to_value(created)?;
-        sqlx::query("INSERT INTO mcp_executions(id,account_id,run_id,document,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at")
-            .bind(id).bind(account).bind(run).bind(document.to_string()).bind(&now).bind(&now).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO mcp_executions(id,run_id,document,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(run_id,id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at")
+            .bind(id).bind(run).bind(document.to_string()).bind(&now).bind(&now).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(())
     }
 
     pub(crate) async fn save_mcp_task_result(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
@@ -349,7 +340,7 @@ impl Store {
         result: &GetTaskResult,
     ) -> Result<()> {
         let mut saved = self
-            .mcp_execution(account, run, id, tool, call)
+            .mcp_execution(run, id, tool, call)
             .await?
             .ok_or(Error::State("MCP 任务记录缺失"))?;
         if saved["task"]["taskId"] != result.task.task.task_id {
@@ -366,8 +357,8 @@ impl Store {
         saved["task"] = serde_json::to_value(&result.task.task)?;
         saved["response"] = response;
         saved["last_response"] = serde_json::to_value(result)?;
-        let changed = sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=? AND EXISTS(SELECT 1 FROM tool_calls t JOIN runs r ON r.account_id=t.account_id AND r.id=t.run_id WHERE t.account_id=mcp_executions.account_id AND t.run_id=mcp_executions.run_id AND t.id=mcp_executions.id AND t.status='waiting_mcp' AND r.status='running')")
-            .bind(saved.to_string()).bind(timestamp()?).bind(account).bind(run).bind(id).execute(&self.pool).await?;
+        let changed = sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=? AND EXISTS(SELECT 1 FROM tool_calls t JOIN runs r ON r.id=t.run_id WHERE t.run_id=mcp_executions.run_id AND t.id=mcp_executions.id AND t.status='waiting_mcp' AND r.status='running')")
+            .bind(saved.to_string()).bind(timestamp()?).bind(run).bind(id).execute(&self.pool).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("MCP 任务无法保存结束结果"));
         }
@@ -408,17 +399,15 @@ mod tests {
             .tempdir_in(root)?;
         let database = directory.path().join("studio.sqlite");
         let mut store = Store::open(&database).await?;
-        let account = "mcp-mrtr-live";
+        let project = "mcp-mrtr-live";
         let model = store
             .save_model(
-                account,
                 None,
                 serde_json::from_str(&std::env::var("PIXOMA_TEST_MODEL_CONFIG")?)?,
             )
             .await?;
         store
             .save_connector(
-                account,
                 None,
                 json!({
                     "name": "官方 SDK 待办服务", "url": std::env::var("PIXOMA_TEST_MRTR_MCP_URL")?,
@@ -426,7 +415,7 @@ mod tests {
                 }),
             )
             .await?;
-        let tools = store.mcp_run_tools(account).await?;
+        let tools = store.mcp_run_tools().await?;
         let find_tool = |name: &str| {
             tools
                 .iter()
@@ -439,30 +428,21 @@ mod tests {
         let complete = find_tool("complete_task")?;
         let clear = find_tool("clear_done")?;
         let before = store
-            .call_mcp_tool(
-                account,
-                &list,
-                json!({ "status": "all" }).as_object().unwrap(),
-            )
+            .call_mcp_tool(&list, json!({ "status": "all" }).as_object().unwrap())
             .await?;
         assert_eq!(before["content"][0]["text"], "No matching tasks.");
         let title = format!("MRTR-{}", uuid::Uuid::new_v4());
         let added = store
             .call_mcp_tool(
-                account,
                 &add,
-                json!({ "title": title, "project": account })
+                json!({ "title": title, "project": project })
                     .as_object()
                     .unwrap(),
             )
             .await?;
         let task_id = text(&added["structuredContent"], "id")?.to_owned();
         store
-            .call_mcp_tool(
-                account,
-                &complete,
-                json!({ "task": task_id }).as_object().unwrap(),
-            )
+            .call_mcp_tool(&complete, json!({ "task": task_id }).as_object().unwrap())
             .await?;
         for (selected, action, deleted) in [
             (None, "cancel", false),
@@ -471,10 +451,9 @@ mod tests {
             (Some("value-0"), "accept", true),
         ] {
             let request = format!("mrtr-{action}-{deleted}");
-            let session = store.create_session(account, &request).await?;
+            let session = store.create_session(&request).await?;
             let queued = store
                 .queue_run(
-                    account,
                     &session.id,
                     &request,
                     text(&model, "id")?,
@@ -483,22 +462,22 @@ mod tests {
                 )
                 .await?;
             let run = text(&queued["run"], "id")?.to_owned();
-            assert!(store.claim_run(account, &run).await?);
+            assert!(store.claim_run(&run).await?);
             let call = ToolCall::from_wire(
                 format!("mrtr-{action}-{deleted}"),
                 ToolFunction::new(clear.definition.name.clone(), json!({})),
             );
-            store.save_tool_part(account, &run, 1, 0, &call).await?;
-            let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+            store.save_tool_part(&run, 1, 0, &call).await?;
+            let record = store.tool_call_records(&run, 1).await?.remove(0);
             let id = text(&record, "id")?.to_owned();
             assert!(
                 store
-                    .execute_local_tool(account, &run, &record, &clear, &call)
+                    .execute_local_tool(&run, &record, &clear, &call)
                     .await?
                     .is_none()
             );
             let saved = store
-                .mcp_execution(account, &run, &id, &clear, &call)
+                .mcp_execution(&run, &id, &clear, &call)
                 .await?
                 .ok_or("MRTR 输入记录缺失")?;
             assert_eq!(saved["input"]["source"], "mrtr");
@@ -507,11 +486,11 @@ mod tests {
             store = Store::open(&database).await?;
             assert_eq!(store.recover_interrupted_runs().await?, 0);
             assert_eq!(
-                store.get_run(account, &run).await?["status"],
+                store.get_run(&run).await?["status"],
                 "waiting_clarification"
             );
-            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
-                .bind(account).bind(&run).fetch_one(&store.pool).await?;
+            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending'")
+                .bind(&run).fetch_one(&store.pool).await?;
             let pending: serde_json::Value = serde_json::from_str(&pending)?;
             let answer = match selected {
                 Some(selected) => json!({
@@ -521,19 +500,19 @@ mod tests {
                 None => json!({ "interruptId": pending["id"], "status": "cancelled" }),
             };
             store
-                .resolve_run_interrupt(account, &session.id, &answer)
+                .resolve_run_interrupt(&session.id, &answer)
                 .await?;
             store.close().await;
             store = Store::open(&database).await?;
             assert_eq!(store.recover_interrupted_runs().await?, 0);
-            assert!(store.claim_run(account, &run).await?);
+            assert!(store.claim_run(&run).await?);
             assert!(
                 !store
-                    .pause_for_mcp_input(account, &run, &id, &clear, &call)
+                    .pause_for_mcp_input(&run, &id, &clear, &call)
                     .await?
             );
             let saved = store
-                .mcp_execution(account, &run, &id, &clear, &call)
+                .mcp_execution(&run, &id, &clear, &call)
                 .await?
                 .ok_or("MRTR 答复记录缺失")?;
             assert_eq!(saved["status"], "ready");
@@ -550,10 +529,10 @@ mod tests {
             store.close().await;
             store = Store::open(&database).await?;
             assert_eq!(store.recover_interrupted_runs().await?, 1);
-            assert!(store.claim_run(account, &run).await?);
-            let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+            assert!(store.claim_run(&run).await?);
+            let record = store.tool_call_records(&run, 1).await?.remove(0);
             let result = store
-                .execute_local_tool(account, &run, &record, &clear, &call)
+                .execute_local_tool(&run, &record, &clear, &call)
                 .await?
                 .ok_or("MRTR 没有返回结果")?;
             let rig::message::UserContent::ToolResult(result) = result else {
@@ -561,7 +540,7 @@ mod tests {
             };
             assert!(!result.is_error);
             let saved = store
-                .mcp_execution(account, &run, &id, &clear, &call)
+                .mcp_execution(&run, &id, &clear, &call)
                 .await?
                 .ok_or("MRTR 结束记录缺失")?;
             assert_eq!(saved["status"], "completed");
@@ -572,11 +551,7 @@ mod tests {
             };
             assert_eq!(saved["response"]["content"][0]["text"], expected);
             let board = store
-                .call_mcp_tool(
-                    account,
-                    &list,
-                    json!({ "status": "all" }).as_object().unwrap(),
-                )
+                .call_mcp_tool(&list, json!({ "status": "all" }).as_object().unwrap())
                 .await?;
             let board = text(&board["content"][0], "text")?;
             if deleted {
@@ -587,10 +562,10 @@ mod tests {
                 assert!(board.contains("[x]"));
             }
             assert_eq!(
-                store.tool_call_records(account, &run, 1).await?[0]["status"],
+                store.tool_call_records(&run, 1).await?[0]["status"],
                 "succeeded"
             );
-            store.finish_run(account, &run, "succeeded", None).await?;
+            store.finish_run(&run, "succeeded", None).await?;
         }
         store.close().await;
         Ok(())
@@ -607,8 +582,7 @@ mod tests {
             .tempdir_in(root)?;
         let database = directory.path().join("studio.sqlite");
         let mut store = Store::open(&database).await?;
-        let account = "mcp-task-live";
-        let model = store.save_model(account, None, json!({
+        let model = store.save_model(None, json!({
             "name": "MCP 任务调用检查", "protocol": "openai_chat_compatible", "base_url": "http://127.0.0.1:18082/v1", "model": "task-state",
             "enabled": true, "agent_enabled": true, "default": true,
             "limits": { "context_window_tokens": 32000, "max_input_tokens": 24000, "max_output_tokens": 4000 },
@@ -616,7 +590,6 @@ mod tests {
         })).await?;
         store
             .save_connector(
-                account,
                 None,
                 json!({
                     "name": "官方 SDK 任务服务", "url": std::env::var("PIXOMA_TEST_TASK_MCP_URL")?,
@@ -625,15 +598,14 @@ mod tests {
             )
             .await?;
         let tool = store
-            .mcp_run_tools(account)
+            .mcp_run_tools()
             .await?
             .into_iter()
             .find(|tool| tool.display_name() == "slow_sum")
             .ok_or("计算工具缺失")?;
-        let session = store.create_session(account, "task-live").await?;
+        let session = store.create_session("task-live").await?;
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "task-live",
                 text(&model, "id")?,
@@ -642,13 +614,13 @@ mod tests {
             )
             .await?;
         let run = text(&queued["run"], "id")?.to_owned();
-        assert!(store.claim_run(account, &run).await?);
+        assert!(store.claim_run(&run).await?);
         let call = ToolCall::from_wire(
             "live-task",
             ToolFunction::new(tool.definition.name.clone(), json!({ "a": 17, "b": 23 })),
         );
-        store.save_tool_part(account, &run, 1, 0, &call).await?;
-        let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+        store.save_tool_part(&run, 1, 0, &call).await?;
+        let record = store.tool_call_records(&run, 1).await?.remove(0);
         let id = text(&record, "id")?.to_owned();
         let initial_store = store.clone();
         let initial_run = run.clone();
@@ -658,7 +630,6 @@ mod tests {
         let initial = tokio::spawn(async move {
             initial_store
                 .execute_local_tool(
-                    account,
                     &initial_run,
                     &initial_record,
                     &initial_tool,
@@ -668,8 +639,8 @@ mod tests {
         });
         let task_id = tokio::time::timeout(std::time::Duration::from_secs(15), async {
             loop {
-                let task: Option<String> = sqlx::query_scalar("SELECT json_extract(document,'$.task.taskId') FROM mcp_executions WHERE account_id=? AND run_id=? AND id=?")
-                    .bind(account).bind(&run).bind(&id).fetch_optional(&store.pool).await?;
+                let task: Option<String> = sqlx::query_scalar("SELECT json_extract(document,'$.task.taskId') FROM mcp_executions WHERE run_id=? AND id=?")
+                    .bind(&run).bind(&id).fetch_optional(&store.pool).await?;
                 if let Some(task) = task { return Ok::<_, crate::Error>(task); }
                 if initial.is_finished() { return Err(crate::Error::State("MCP 调用没有保存任务编号")); }
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -680,10 +651,10 @@ mod tests {
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 1);
-        assert!(store.claim_run(account, &run).await?);
-        let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+        assert!(store.claim_run(&run).await?);
+        let record = store.tool_call_records(&run, 1).await?.remove(0);
         let result = store
-            .execute_local_tool(account, &run, &record, &tool, &call)
+            .execute_local_tool(&run, &record, &tool, &call)
             .await?
             .ok_or("任务没有返回结果")?;
         let rig::message::UserContent::ToolResult(result) = result else {
@@ -693,13 +664,13 @@ mod tests {
         let output = result.content[0].as_json().ok_or("结构化结果缺失")?;
         assert_eq!(output["content"][0]["text"], (17 + 23).to_string());
         let saved = store
-            .mcp_execution(account, &run, &id, &tool, &call)
+            .mcp_execution(&run, &id, &tool, &call)
             .await?
             .ok_or("任务记录缺失")?;
         assert_eq!(saved["task"]["taskId"], task_id);
         assert_eq!(saved["status"], "completed");
         assert_eq!(
-            store.tool_call_records(account, &run, 1).await?[0]["status"],
+            store.tool_call_records(&run, 1).await?[0]["status"],
             "succeeded"
         );
         store.close().await;
@@ -716,17 +687,15 @@ mod tests {
             .tempdir_in(root)?;
         let database = directory.path().join("studio.sqlite");
         let mut store = Store::open(&database).await?;
-        let account = "mcp-task-state";
-        let model = store.save_model(account, None, json!({
+        let model = store.save_model(None, json!({
             "name": "MCP 任务保存检查", "protocol": "openai_chat_compatible", "base_url": "http://127.0.0.1:18082/v1", "model": "task-state",
             "enabled": true, "agent_enabled": true, "default": true,
             "limits": { "context_window_tokens": 32000, "max_input_tokens": 24000, "max_output_tokens": 4000 },
             "thinking": { "enabled": false }, "capabilities": { "tools": true, "vision": false, "image_output": false, "streaming": true }
         })).await?;
-        let session = store.create_session(account, "task-state").await?;
+        let session = store.create_session("task-state").await?;
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "task-state",
                 text(&model, "id")?,
@@ -735,7 +704,7 @@ mod tests {
             )
             .await?;
         let run = text(&queued["run"], "id")?;
-        assert!(store.claim_run(account, run).await?);
+        assert!(store.claim_run(run).await?);
         let tool = RunTool {
             definition: ToolDefinition::new(
                 ToolName::new("read_task")?,
@@ -746,7 +715,6 @@ mod tests {
                 connector_id: "tasks".to_owned(),
                 url: "http://127.0.0.1:18082/mcp".to_owned(),
                 name: "read_task".to_owned(),
-                credential_ref: None,
             },
             requires_approval: false,
             read_only: true,
@@ -755,11 +723,11 @@ mod tests {
             "task-state",
             ToolFunction::new(tool.definition.name.clone(), json!({})),
         );
-        store.save_tool_part(account, run, 1, 0, &call).await?;
-        let record = store.tool_call_records(account, run, 1).await?.remove(0);
+        store.save_tool_part(run, 1, 0, &call).await?;
+        let record = store.tool_call_records(run, 1).await?.remove(0);
         let id = text(&record, "id")?;
-        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(serde_json::to_string(&tool)?).bind(account).bind(run).bind(id).execute(&store.pool).await?;
+        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE run_id=? AND id=?")
+            .bind(serde_json::to_string(&tool)?).bind(run).bind(id).execute(&store.pool).await?;
         let now = crate::error::timestamp()?;
         let task = Task::new(
             uuid::Uuid::new_v4().to_string(),
@@ -771,7 +739,7 @@ mod tests {
         let created = rmcp::model::CreateTaskResult::new(task.clone())
             .with_meta(serde_json::from_value(json!({ "trace": "created" }))?);
         store
-            .save_mcp_task(account, run, id, &tool, &call, &created)
+            .save_mcp_task(run, id, &tool, &call, &created)
             .await?;
         let requests = serde_json::from_value(json!({
             "confirm": { "method": "elicitation/create", "params": {
@@ -789,7 +757,6 @@ mod tests {
         ));
         store
             .save_mcp_inputs(
-                account,
                 run,
                 id,
                 &tool,
@@ -799,34 +766,34 @@ mod tests {
             .await?;
         assert!(
             store
-                .pause_for_mcp_input(account, run, id, &tool, &call)
+                .pause_for_mcp_input(run, id, &tool, &call)
                 .await?
         );
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 0);
         assert_eq!(
-            store.get_run(account, run).await?["status"],
+            store.get_run(run).await?["status"],
             "waiting_clarification"
         );
         for (selected, remains) in [("value-0", true), ("accept", false)] {
-            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
-                .bind(account).bind(run).fetch_one(&store.pool).await?;
+            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending'")
+                .bind(run).fetch_one(&store.pool).await?;
             let pending: serde_json::Value = serde_json::from_str(&pending)?;
             let answer = json!({ "interruptId": pending["id"], "status": "resolved", "payload": { "selected": selected } });
             store
-                .resolve_run_interrupt(account, &session.id, &answer)
+                .resolve_run_interrupt(&session.id, &answer)
                 .await?;
-            assert!(store.claim_run(account, run).await?);
+            assert!(store.claim_run(run).await?);
             assert_eq!(
                 store
-                    .pause_for_mcp_input(account, run, id, &tool, &call)
+                    .pause_for_mcp_input(run, id, &tool, &call)
                     .await?,
                 remains
             );
         }
         let saved = store
-            .mcp_execution(account, run, id, &tool, &call)
+            .mcp_execution(run, id, &tool, &call)
             .await?
             .ok_or("任务输入记录缺失")?;
         assert_eq!(
@@ -851,7 +818,6 @@ mod tests {
         assert!(
             store
                 .save_mcp_inputs(
-                    account,
                     run,
                     id,
                     &tool,
@@ -867,14 +833,14 @@ mod tests {
         ));
         working.meta = Some(serde_json::from_value(json!({ "trace": "working-query" }))?);
         store
-            .save_mcp_task_result(account, run, id, &tool, &call, &working)
+            .save_mcp_task_result(run, id, &tool, &call, &working)
             .await?;
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 1);
-        assert_eq!(store.get_run(account, run).await?["status"], "queued");
+        assert_eq!(store.get_run(run).await?["status"], "queued");
         let saved = store
-            .mcp_execution(account, run, id, &tool, &call)
+            .mcp_execution(run, id, &tool, &call)
             .await?
             .ok_or("MCP 任务记录缺失")?;
         assert_eq!(saved["task"]["taskId"], task.task_id);
@@ -883,7 +849,7 @@ mod tests {
         assert_eq!(saved["last_response"]["_meta"]["trace"], "working-query");
         assert!(
             store
-                .mcp_execution("other-account", run, id, &tool, &call)
+                .mcp_execution("missing-run", id, &tool, &call)
                 .await
                 .is_err()
         );
@@ -894,19 +860,18 @@ mod tests {
             .insert("changed".to_owned(), json!(true));
         assert!(
             store
-                .mcp_execution(account, run, id, &tool, &changed)
+                .mcp_execution(run, id, &tool, &changed)
                 .await
                 .is_err()
         );
         let row =
-            sqlx::query("SELECT status FROM tool_calls WHERE account_id=? AND run_id=? AND id=?")
-                .bind(account)
+            sqlx::query("SELECT status FROM tool_calls WHERE run_id=? AND id=?")
                 .bind(run)
                 .bind(id)
                 .fetch_one(&store.pool)
                 .await?;
         assert_eq!(row.get::<String, _>("status"), "waiting_mcp");
-        assert!(store.claim_run(account, run).await?);
+        assert!(store.claim_run(run).await?);
         let result = rmcp::model::CallToolResult::success(vec![rmcp::model::ContentBlock::text(
             (17 + 23).to_string(),
         )]);
@@ -923,14 +888,14 @@ mod tests {
             json!({ "trace": { "request": "completed-query" } }),
         )?);
         store
-            .save_mcp_task_result(account, run, id, &tool, &call, &result)
+            .save_mcp_task_result(run, id, &tool, &call, &result)
             .await?;
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 1);
-        assert_eq!(store.get_run(account, run).await?["status"], "queued");
+        assert_eq!(store.get_run(run).await?["status"], "queued");
         let saved = store
-            .mcp_execution(account, run, id, &tool, &call)
+            .mcp_execution(run, id, &tool, &call)
             .await?
             .ok_or("MCP 结束结果缺失")?;
         assert_eq!(saved["status"], "completed");
@@ -940,14 +905,14 @@ mod tests {
             "completed-query"
         );
         assert_eq!(saved["created_response"]["_meta"]["trace"], "created");
-        assert!(store.claim_run(account, run).await?);
-        store.finish_run(account, run, "cancelled", None).await?;
-        let record = store.tool_call_records(account, run, 1).await?.remove(0);
+        assert!(store.claim_run(run).await?);
+        store.finish_run(run, "cancelled", None).await?;
+        let record = store.tool_call_records(run, 1).await?.remove(0);
         assert_eq!(record["status"], "failed");
         assert!(record["result"].to_string().contains(&task.task_id));
         assert_eq!(
             store
-                .mcp_execution(account, run, id, &tool, &call)
+                .mcp_execution(run, id, &tool, &call)
                 .await?
                 .ok_or("取消后任务记录缺失")?["task"]["status"],
             "completed"

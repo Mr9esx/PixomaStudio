@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { EditorView } from '@codemirror/view'
 import { useQuery } from '@tanstack/react-query'
 import {
+  ArrowLeft,
   AudioLines,
   Download,
   Ellipsis,
@@ -35,6 +36,7 @@ import { cn } from '@/lib/utils'
 import { Badge } from '@/components/ui/badge'
 import { Button } from '@/components/ui/button'
 import { Checkbox } from '@/components/ui/checkbox'
+import { ContextMenu, ContextMenuContent, ContextMenuGroup, ContextMenuItem, ContextMenuTrigger } from '@/components/ui/context-menu'
 import {
   Dialog,
   DialogContent,
@@ -47,6 +49,7 @@ import {
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuItem,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
@@ -55,6 +58,7 @@ import {
 import { IconButtonTooltip } from '@/components/ui/icon-button-tooltip'
 import { Input } from '@/components/ui/input'
 import { ScrollArea } from '@/components/ui/scroll-area'
+import { Empty, EmptyHeader, EmptyTitle } from '@/components/ui/empty'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Textarea } from '@/components/ui/textarea'
 import { MessageResponse } from '@/components/ai-elements/message'
@@ -82,8 +86,6 @@ export function AssetKindIcon({ kind, ...props }: { kind: StudioAsset['kind'] } 
 type Props = {
   assets: StudioAsset[]
   layout?: AssetLayout
-  focusAsset?: { id: string; request: number }
-  onFocusAssetClose?: (request: number) => void
   messages?: StudioMessage[]
   onLocateMessage?: (messageId: string) => void
   onUpdateTextAsset?: (input: {
@@ -96,20 +98,15 @@ type Props = {
 export function StudioAssets({
   assets,
   layout = 'adaptive',
-  focusAsset,
-  onFocusAssetClose,
   messages,
   onLocateMessage,
   onUpdateTextAsset,
 }: Props) {
   const [assetToView, setAssetToView] = useState<StudioAsset>()
-  const focusedAsset = focusAsset && assets.find((asset) => asset.id === focusAsset.id)
   return (
     <div className='flex h-full min-h-0 flex-col'>
       {assets.length === 0 ? (
-        <div className='flex min-h-0 flex-1 flex-col items-center justify-center px-8 text-center'>
-          <p className='text-sm text-muted-foreground'>暂无资产</p>
-        </div>
+        <Empty><EmptyHeader><EmptyTitle>暂无资产</EmptyTitle></EmptyHeader></Empty>
       ) : (
         <ScrollArea className='min-h-0 flex-1'>
           <div
@@ -155,11 +152,10 @@ export function StudioAssets({
         </p>
       </div>
       <SessionAssetDetailsDialog
-        asset={focusedAsset || assetToView}
+        asset={assetToView}
         onOpenChange={(open) => {
           if (!open) {
             setAssetToView(undefined)
-            if (focusAsset) onFocusAssetClose?.(focusAsset.request)
           }
         }}
       />
@@ -324,6 +320,7 @@ export function AssetCard({
   asset,
   preview = false,
   lazyText = false,
+  unframed = false,
   layout = 'grid',
   onOpenDetails,
   onSelect,
@@ -334,8 +331,9 @@ export function AssetCard({
   asset: StudioAsset
   preview?: boolean
   lazyText?: boolean
+  unframed?: boolean
   layout?: 'grid' | 'list'
-  onOpenDetails?: (asset: StudioAsset) => void
+  onOpenDetails?: (asset: StudioAsset, trigger: HTMLButtonElement) => void
   onSelect?: () => void
   selected?: boolean
   onLocateSource?: () => void
@@ -354,27 +352,30 @@ export function AssetCard({
     Number(Boolean(onLocateSource)) +
     Number(canEdit)
   return (
-    <article
+    <ContextMenu><ContextMenuTrigger asChild><article
       data-slot='studio-asset-card'
       className={cn(
         'group relative min-w-0 overflow-hidden rounded-lg border bg-card',
         styles.card,
+        unframed && 'border-0 bg-transparent',
         layout === 'list' && 'flex',
         selected && ['border-primary bg-accent/30', styles.selected]
       )}
     >
-      {onSelect ? (
-        <label className='absolute top-2 right-2 z-10 flex size-8 cursor-pointer items-center justify-center rounded-md bg-card'>
+      {onOpenDetails ? <Button data-slot='asset-open' type='button' variant='link' aria-label={`${onSelect ? '选择' : '预览'} ${asset.name}`} className='absolute inset-0 z-10 size-full rounded-lg p-0 focus-visible:ring-inset' onClick={event => onSelect ? onSelect() : onOpenDetails(asset, event.currentTarget)} /> : null}
+      {onSelect && !unframed ? (
+        <label className={cn('absolute top-2 z-20 flex size-8 cursor-pointer items-center justify-center rounded-md bg-card', unframed ? 'left-2' : 'right-2')}>
           <Checkbox checked={selected} onCheckedChange={onSelect} aria-label={`选择 ${asset.name}`} />
         </label>
       ) : null}
       <div
         className={cn(
-          'aspect-[16/10] px-3 pt-3',
+          'aspect-[16/10]',
+          !unframed && 'px-3 pt-3',
           layout === 'list' && 'aspect-square w-28 shrink-0 p-2'
         )}
       >
-        <div className='flex size-full items-center justify-center overflow-hidden rounded-md border bg-muted/50'>
+        <div inert={Boolean(onOpenDetails)} className={cn('flex size-full items-center justify-center overflow-hidden rounded-md bg-muted', !unframed && 'border')}>
           <AssetPreview
             asset={asset}
             preview={preview}
@@ -385,38 +386,30 @@ export function AssetCard({
       </div>
       <div
         className={cn(
-          'flex min-w-0 flex-col gap-3 p-3',
+          'min-w-0',
+          unframed ? 'grid grid-cols-[minmax(0,1fr)_auto] items-start gap-2 px-1 py-3' : 'flex flex-col gap-3 p-3',
           layout === 'list' &&
             'flex-1 justify-between'
         )}
       >
-        <div className={cn('flex items-start gap-2', onSelect && layout === 'list' && 'pr-9')}>
+        <div className={cn('flex min-w-0 items-start gap-2', !unframed && onSelect && layout === 'list' && 'pr-9')}>
+          {unframed && onSelect ? <label className='relative z-20 flex size-6 shrink-0 cursor-pointer items-center justify-center'><Checkbox checked={selected} onCheckedChange={onSelect} aria-label={`选择 ${asset.name}`} /></label> : null}
           <div className='min-w-0 flex-1'>
             <p className='truncate text-sm font-medium'>{asset.name}</p>
             <p className='mt-1 text-xs text-muted-foreground'>
-              版本 {asset.current_version} · {originLabel(asset.origin)}
+              {unframed ? `${kindLabel(asset.kind)}${version?.format ? ` · ${version.format.toUpperCase()}` : ''}` : `版本 ${asset.current_version} · ${originLabel(asset.origin)}`}
             </p>
           </div>
-          <Badge variant='secondary' className='shrink-0'>
+          {!unframed ? <Badge variant='secondary' className='shrink-0'>
             <AssetKindIcon kind={asset.kind} />
             {kindLabel(asset.kind)}
-          </Badge>
+          </Badge> : null}
         </div>
         <div
-          className={cn('flex items-center gap-1', styles.actions)}
+          className={cn('relative z-20 flex items-center gap-1', styles.actions, unframed && [styles.compactActions, styles.inlineActions])}
           data-secondary-count={secondaryActionCount}
         >
-          {onOpenDetails ? (
-            <Button
-              variant='outline'
-              size='sm'
-              className='min-w-0 flex-1'
-              onClick={() => onOpenDetails(asset)}
-            >
-              <Eye />
-              查看
-            </Button>
-          ) : (
+          {!onOpenDetails ? (
             <Button
               variant='outline'
               size='sm'
@@ -429,7 +422,7 @@ export function AssetCard({
                 查看
               </a>
             </Button>
-          )}
+          ) : null}
           <div
             className={cn(
               'flex shrink-0 items-center gap-1',
@@ -488,6 +481,7 @@ export function AssetCard({
               </DropdownMenuTrigger>
             </IconButtonTooltip>
             <DropdownMenuContent align='end'>
+              <DropdownMenuGroup>
               {contentURL ? (
                 <DropdownMenuItem asChild>
                   <a href={contentURL} download={asset.name}>
@@ -508,6 +502,7 @@ export function AssetCard({
                   编辑文档
                 </DropdownMenuItem>
               ) : null}
+              </DropdownMenuGroup>
             </DropdownMenuContent>
           </DropdownMenu>
         </div>
@@ -520,7 +515,15 @@ export function AssetCard({
           onOpenChange={setEditing}
         />
       ) : null}
-    </article>
+    </article></ContextMenuTrigger>
+      <ContextMenuContent>
+        <ContextMenuGroup>
+          {contentURL ? <ContextMenuItem asChild><a href={contentURL} download={asset.name}><Download />下载资产</a></ContextMenuItem> : null}
+          {onLocateSource ? <ContextMenuItem onSelect={onLocateSource}><MessageSquareText />定位生成对话</ContextMenuItem> : null}
+          {canEdit ? <ContextMenuItem onSelect={() => setEditing(true)}><Pencil />编辑文档</ContextMenuItem> : null}
+        </ContextMenuGroup>
+      </ContextMenuContent>
+    </ContextMenu>
   )
 }
 
@@ -615,13 +618,14 @@ function VideoAssetPreview({ contentURL, posterURL, name, expanded }: { contentU
   />
 }
 
-export function AssetDetailPreview({ asset, expanded, onExpandedChange }: {
+export function AssetDetailPreview({ asset, expanded, onExpandedChange, className }: {
   asset: StudioAsset
   expanded: boolean
   onExpandedChange?: (expanded: boolean) => void
+  className?: string
 }) {
   return (
-    <div className={cn('relative flex min-h-72 min-w-0 items-center justify-center overflow-hidden bg-background lg:w-2/3', expanded && 'lg:w-full')}>
+    <div className={cn('relative flex min-h-72 min-w-0 items-center justify-center overflow-hidden bg-background lg:w-2/3', expanded && 'lg:w-full', className)}>
       <AssetPreview asset={asset} preview expanded />
       {onExpandedChange ? <IconButtonTooltip label={expanded ? '恢复详情' : '放大资产'}>
         <Button variant='outline' size='icon' className='absolute top-4 right-4' aria-label={expanded ? '恢复详情' : '放大资产'} onClick={() => onExpandedChange(!expanded)}>
@@ -632,7 +636,7 @@ export function AssetDetailPreview({ asset, expanded, onExpandedChange }: {
   )
 }
 
-export function AssetDetailsDialog({ open, onOpenChange, asset, expanded, onExpandedChange, description, title = '资产详情', previewContent, nameAction, nameEditor, footer, fallback, children }: {
+export function AssetDetailsDialog({ open, onOpenChange, asset, expanded, onExpandedChange, description, title = '资产详情', previewContent, nameAction, nameEditor, footer, fallback, children, inline = false, returnFocus, actions, location }: {
   open: boolean
   onOpenChange: (open: boolean) => void
   asset?: StudioAsset
@@ -646,7 +650,33 @@ export function AssetDetailsDialog({ open, onOpenChange, asset, expanded, onExpa
   footer?: ReactNode
   fallback?: ReactNode
   children?: ReactNode
+  inline?: boolean
+  returnFocus?: HTMLElement | null
+  actions?: ReactNode
+  location?: ReactNode
 }) {
+  const inspectorRef = useRef<HTMLElement>(null)
+  useEffect(() => {
+    if (!inline || !open) return
+    const previous = returnFocus ?? document.activeElement
+    inspectorRef.current?.focus({ preventScroll: true })
+    return () => { window.requestAnimationFrame(() => { if (previous instanceof HTMLElement && previous.isConnected) previous.focus({ preventScroll: true }) }) }
+  }, [inline, open, returnFocus])
+  if (inline) return open ? <section ref={inspectorRef} tabIndex={-1} data-slot='asset-inspector' aria-label={title} className='absolute inset-0 z-30 flex min-h-0 min-w-0 flex-col overflow-hidden bg-card outline-none' onKeyDown={event => {
+    if (event.key !== 'Escape' || (event.defaultPrevented && event.target !== event.currentTarget) || (event.target as HTMLElement).closest('[role="dialog"], [role="alertdialog"], [role="menu"], [role="listbox"]')) return
+    event.preventDefault()
+    onOpenChange(false)
+  }}>
+    <header data-tauri-drag-region='deep' className='studio-page-header studio-continuous-header'><Button size='icon-sm' variant='ghost' aria-label='关闭资产详情' onClick={() => onOpenChange(false)}><ArrowLeft /></Button>{location}<h2 className='min-w-0 flex-1 truncate text-sm font-medium'>{asset?.name ?? title}</h2>{nameAction}{actions}{asset && onExpandedChange ? <Button size='icon-sm' variant='ghost' aria-label={expanded ? '返回资产详情' : '放大资产'} onClick={() => onExpandedChange(!expanded)}>{expanded ? <Minimize2 /> : <Maximize2 />}</Button> : null}</header>
+    {asset ? <div className='flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto px-4 pb-4 xl:flex-row xl:overflow-hidden'>
+      <div data-slot='asset-preview' className='flex min-h-[min(60vh,32rem)] min-w-0 flex-1 flex-col overflow-hidden rounded-xl border bg-background xl:min-h-0'>{previewContent ?? <AssetDetailPreview asset={asset} expanded={Boolean(expanded)} className='min-h-0 w-full flex-1 lg:w-full' />}</div>
+      {!expanded ? <aside aria-label='资产属性' className='flex w-full min-w-0 shrink-0 flex-col gap-5 rounded-xl bg-muted/40 p-4 xl:w-72 xl:overflow-y-auto'>
+        {nameEditor ? <section>{nameEditor}</section> : null}
+        {children}
+        {footer ? <footer>{footer}</footer> : null}
+      </aside> : null}
+    </div> : fallback}
+  </section> : null
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className='flex h-[min(94svh,1100px)] w-[calc(100vw-2rem)] flex-col gap-0 overflow-hidden p-0 sm:max-w-[1500px]'>
@@ -677,7 +707,7 @@ export function AssetDetailsDialog({ open, onOpenChange, asset, expanded, onExpa
 export function AssetDetailsInfo({ children }: { children: ReactNode }) {
   return <section className='flex flex-col gap-2'>
     <h2 className='text-sm font-semibold'>基本信息</h2>
-    <div className='grid grid-cols-[5rem_minmax(0,1fr)] items-center gap-x-3 gap-y-3 text-sm tabular-nums'>{children}</div>
+    <div className='grid grid-cols-[4rem_minmax(0,1fr)] items-center gap-x-3 gap-y-2 text-sm tabular-nums'>{children}</div>
   </section>
 }
 

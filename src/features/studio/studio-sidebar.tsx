@@ -17,11 +17,11 @@ import {
   Plus,
   Settings2,
   Workflow,
-  Bot,
   Sparkles,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useTranslation } from 'react-i18next'
+import { useTheme } from '@/context/theme-provider'
 import {
   deleteStudioProject,
   listStudioLibraryProjects,
@@ -64,7 +64,7 @@ import {
   SidebarMenuItem,
 } from '@/components/ui/sidebar'
 import { AppTitle } from '@/components/layout/app-title'
-import { NavUser } from '@/components/layout/nav-user'
+import { ThemeSwitcher } from '@/components/kibo-ui/theme-switcher'
 import { StatusDot } from '@/components/status-dot'
 import { StudioProjectDialog } from './studio-project-dialog'
 import {
@@ -161,6 +161,7 @@ export function StudioSidebar({
   onViewChange,
 }: Props) {
   const { t } = useTranslation()
+  const { theme, setTheme } = useTheme()
   const queryClient = useQueryClient()
   const [projectsExpanded, setProjectsExpanded] = useState(true)
   const [recentExpanded, setRecentExpanded] = useState(true)
@@ -358,7 +359,7 @@ export function StudioSidebar({
 
   return (
     <Sidebar collapsible='none' className='p-2'>
-      <SidebarHeader>
+      <SidebarHeader data-tauri-drag-region='deep' className='studio-sidebar-header'>
         <AppTitle showToggle={false} />
       </SidebarHeader>
 
@@ -385,19 +386,9 @@ export function StudioSidebar({
                 </SidebarMenuButton>
               </SidebarMenuItem>
               <SidebarMenuItem>
-                <SidebarMenuButton isActive={view === 'market'} onClick={() => onViewChange('market')}><Workflow /><span>{t('workflowMarket.title')}</span></SidebarMenuButton>
+                <SidebarMenuButton isActive={view === 'market'} onClick={() => onViewChange('market')}><Workflow /><span>工作流</span></SidebarMenuButton>
               </SidebarMenuItem>
-              <SidebarMenuItem><SidebarMenuButton isActive={view === 'skill-market'} onClick={() => onViewChange('skill-market')}><Sparkles /><span>{t('agentAssets.skillMarket')}</span></SidebarMenuButton></SidebarMenuItem>
-              <SidebarMenuItem><SidebarMenuButton isActive={view === 'expert-market'} onClick={() => onViewChange('expert-market')}><Bot /><span>{t('agentAssets.expertMarket')}</span></SidebarMenuButton></SidebarMenuItem>
-              <SidebarMenuItem>
-                <SidebarMenuButton
-                  isActive={view === 'settings'}
-                  onClick={() => onViewChange('settings')}
-                >
-                  <Settings2 />
-                  <span>{t('studioOperations.settings')}</span>
-                </SidebarMenuButton>
-              </SidebarMenuItem>
+              <SidebarMenuItem><SidebarMenuButton isActive={view === 'skill-market' || view === 'expert-market'} onClick={() => onViewChange('skill-market')}><Sparkles /><span>{t('agentAssets.catalogTitle')}</span></SidebarMenuButton></SidebarMenuItem>
             </SidebarMenu>
           </SidebarGroupContent>
         </SidebarGroup>
@@ -410,7 +401,7 @@ export function StudioSidebar({
             <Button
               variant='ghost'
               size='sm'
-              className='h-8 min-w-0 flex-1 justify-start gap-1 px-0 text-sm font-normal text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground/80 has-[>svg]:px-0'
+              className={`${styles.sectionToggle} h-8 min-w-0 flex-1 justify-start gap-1 px-0 text-sm font-normal text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground/80 has-[>svg]:px-0`}
               aria-expanded={projectsExpanded}
               aria-label={projectsExpanded ? '折叠项目' : '展开项目'}
               onClick={() => setProjectsExpanded((value) => !value)}
@@ -437,7 +428,7 @@ export function StudioSidebar({
             inert={!projectsExpanded}
           >
             <div className='studio-scrollbar min-h-0 w-full min-w-0 flex-auto overflow-x-hidden overflow-y-auto'>
-              <SidebarMenu className='pb-2'>
+              <SidebarMenu className='gap-0.5 pb-2'>
                 {projects.data?.map((project) => (
                   <ProjectSessions
                     key={project.id}
@@ -477,7 +468,7 @@ export function StudioSidebar({
             <Button
               variant='ghost'
               size='sm'
-              className='h-8 min-w-0 flex-1 justify-start gap-1 px-0 text-sm font-normal text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground/80 has-[>svg]:px-0'
+              className={`${styles.sectionToggle} h-8 min-w-0 flex-1 justify-start gap-1 px-0 text-sm font-normal text-muted-foreground/80 hover:bg-transparent hover:text-muted-foreground/80 has-[>svg]:px-0`}
               aria-expanded={recentExpanded}
               aria-label={recentExpanded ? '折叠最近对话' : '展开最近对话'}
               onClick={() => setRecentExpanded((value) => !value)}
@@ -545,6 +536,23 @@ export function StudioSidebar({
         </SidebarGroup>
       </SidebarContent>
 
+      <SidebarFooter className='px-2 py-1'>
+        <div className='flex h-12 items-center gap-2'>
+          <SidebarMenu className='min-w-0 flex-1'>
+            <SidebarMenuItem>
+              <SidebarMenuButton
+                isActive={view === 'settings'}
+                onClick={() => onViewChange('settings')}
+              >
+                <Settings2 />
+                <span>{t('studioOperations.settings')}</span>
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+          </SidebarMenu>
+          <ThemeSwitcher value={theme} onChange={setTheme} className='shrink-0' />
+        </div>
+      </SidebarFooter>
+
       {dialogOpen ? (
         <StudioProjectDialog
           open
@@ -588,9 +596,6 @@ export function StudioSidebar({
         </AlertDialogContent>
       </AlertDialog>
 
-      <SidebarFooter>
-        <NavUser studio />
-      </SidebarFooter>
     </Sidebar>
   )
 }
@@ -653,7 +658,7 @@ function ProjectSessions({
             </Button>
           </DropdownMenuTrigger>
           <DropdownMenuContent align='end'>
-            <DropdownMenuItem onSelect={onRename}>重命名</DropdownMenuItem>
+            <DropdownMenuItem onSelect={onRename}>编辑项目</DropdownMenuItem>
             <DropdownMenuItem variant='destructive' onSelect={onDelete}>
               删除项目
             </DropdownMenuItem>
@@ -676,7 +681,7 @@ function ProjectSessions({
         inert={!expanded}
       >
         <div className={styles.projectSessionsInner}>
-          <SidebarMenu>
+          <SidebarMenu className='gap-0.5 pt-0.5'>
             {sessions.data?.pages
               .flatMap((page) => page.slice(0, 5))
               .map(renderSession)}

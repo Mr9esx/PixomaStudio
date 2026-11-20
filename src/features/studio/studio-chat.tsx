@@ -111,9 +111,7 @@ import {
   PromptInput,
   PromptInputBody,
   PromptInputButton,
-  PromptInputFooter,
   PromptInputSubmit,
-  PromptInputTools,
   usePromptInputAttachments,
 } from '@/components/ai-elements/prompt-input'
 import {
@@ -132,8 +130,8 @@ import {
 } from '@/components/ai-elements/tool'
 import { StudioComposer, type StudioComposerHandle, type StudioReference } from './studio-composer'
 import composerSurface from './studio-composer-surface.module.css'
-import { ModelPicker, PermissionPicker } from './studio-chat-controls'
-import type { StudioComposerValue } from './studio-composer-content'
+import { ModelPicker, PermissionPicker, StudioComposerFooter } from './studio-chat-controls'
+import { newStudioAssetReferences, type StudioComposerValue } from './studio-composer-content'
 import { retainStudioComposerFocus } from './studio-composer-focus'
 import { StudioReferenceBadge } from './studio-reference-badge'
 import {
@@ -144,8 +142,13 @@ import {
 import { StudioTurnNavigator } from './studio-turn-navigator'
 import { ExpertTaskProgress, StudioExpertCard } from './studio-expert-card'
 import { StudioWorkflowCard } from './studio-workflow-card'
+import type { VideoScriptRequest } from './video-script-request'
 
 type Props = {
+  onEditorSenderChange?: (send: ((request: StudioEditorRequest) => void) | undefined) => void
+  onEditorRequestChange?: (request: VideoScriptRequest) => void
+  materialContext?: StudioRunConfig['materialContext']
+  materialContextPending?: boolean
   endpointBase?: string
   expertTasks?: StudioExpertTask[]
   expertCards?: StudioExpertCardRecord[]
@@ -166,7 +169,7 @@ type Props = {
   permissionMode: StudioPermissionMode
   skills: StudioSkillSummary[]
   assets: StudioAsset[]
-  locateMessage?: { id: string; request: number }
+  locateMessage?: { id: string; alternateId?: string; request: number }
   selectedSkillIds: string[]
   selectedAssets: SelectedAsset[]
   onModelChange: (id: string) => void
@@ -178,6 +181,8 @@ type Props = {
   onRunFinished?: () => void
   onRuntimeStateChange?: (running: boolean) => void
 }
+
+export type StudioEditorRequest = { text: string; skillId: string; label: string; videoEditContext: NonNullable<StudioRunConfig['videoEditContext']> }
 
 type SelectedAsset = { assetId: string; assetVersionId: string }
 type ClarificationDraft = { id: string; selected: string; custom: string }
@@ -202,17 +207,17 @@ export function StudioMessageQueue({ messages, availableModelIds, onSendNow, onR
       {messages.map((message) => (
         <div key={message.id} role='listitem' data-slot='studio-queued-message' className='flex min-h-8 items-center gap-1 border-b px-3 [@media(pointer:coarse)]:min-h-11 last:border-b-0'>
           <CornerDownRight className='size-4 shrink-0 text-muted-foreground' aria-hidden='true' />
-          <span className='min-w-0 flex-1 truncate text-sm'>{message.value.text}</span>
+          <span className='min-w-0 flex-1 truncate text-sm'>{message.runConfig.editorRequest?.label ?? message.value.text}</span>
           <Button type='button' variant='ghost' size='sm' className='font-normal text-muted-foreground hover:text-foreground max-sm:px-0' aria-label={`立即发送：${message.value.text}`} disabled={!availableModelIds.includes(message.runConfig.modelConfigId)} onClick={() => onSendNow(message)}>
             <ArrowUp /><span className='hidden sm:inline'>立即发送</span>
           </Button>
           <Button type='button' variant='ghost' size='icon-sm' aria-label={`删除待发送消息：${message.value.text}`} onClick={() => onRemove(message.id)}><Trash2 /></Button>
-          <DropdownMenu>
+          {!message.runConfig.videoEditContext ? <DropdownMenu>
             <DropdownMenuTrigger asChild><Button type='button' variant='ghost' size='icon-sm' aria-label={`更多操作：${message.value.text}`}><MoreHorizontal /></Button></DropdownMenuTrigger>
             <DropdownMenuContent align='end' onCloseAutoFocus={retainStudioComposerFocus}>
               <DropdownMenuGroup><DropdownMenuItem onSelect={() => onEdit(message)}><Pencil />编辑消息</DropdownMenuItem></DropdownMenuGroup>
             </DropdownMenuContent>
-          </DropdownMenu>
+          </DropdownMenu> : null}
         </div>
       ))}
     </div>
@@ -366,6 +371,8 @@ function StudioChatRuntime({
   onReconnect: (draft?: ClarificationDraft) => void
 }) {
   const [activity, setActivity] = useState<string | null>()
+  const editorRequestChange = useRef(props.onEditorRequestChange)
+  editorRequestChange.current = props.onEditorRequestChange
   const availableModels = props.models.filter(
     (model) => model.enabled && model.agent_enabled && model.capabilities.tools
   )
@@ -381,12 +388,14 @@ function StudioChatRuntime({
       permissionMode: props.permissionMode,
       selectedSkillIds: props.selectedSkillIds,
       selectedAssets: props.selectedAssets,
+      materialContext: props.materialContext,
     }),
     [
       selectedModel?.id,
       props.permissionMode,
       props.selectedSkillIds,
       props.selectedAssets,
+      props.materialContext,
     ]
   )
   const agent = useMemo(() => {
@@ -401,6 +410,12 @@ function StudioChatRuntime({
         toAGUIMessages(props.messages)) as never[],
       runConfig,
       onEvent: (event) => setActivity((current) => nextStudioActivity(current, event)),
+      onRunCreated: (config, run, clientMessageId) => {
+        if (config.editorRequest) editorRequestChange.current?.({ ...config.editorRequest, sessionId: props.sessionId, status: 'submitted', runId: run.id, messageId: run.trigger_message_id, clientMessageId, error: undefined })
+      },
+      onRunError: (config, error) => {
+        if (config.editorRequest) editorRequestChange.current?.({ ...config.editorRequest, sessionId: props.sessionId, status: 'failed', error: error instanceof Error ? error.message : String(error) })
+      },
     })
     // A runtime owns the active connection. Replacing the agent when a
     // transcript query refreshes would silently abandon that connection.
@@ -570,10 +585,36 @@ function StudioChatSurface({
   >(() => new Set())
   const [cancellingClarification, setCancellingClarification] = useState(false)
   const composerRef = useRef<StudioComposerHandle>(null)
-  const composerOverlayRef = useRef<HTMLDivElement>(null)
+  const composerContainerRef = useRef<HTMLDivElement>(null)
   const [composerValue, setComposerValue] = useState<StudioComposerValue>({
     text: '', parts: [], selectedSkillIds: [], selectedAssets: [],
   })
+  const referenceSession = useRef(props.sessionId)
+  const pendingAssetReferences = useRef(new Set<string>())
+  useEffect(() => {
+    referenceSession.current = props.sessionId
+    return () => { referenceSession.current = ''; pendingAssetReferences.current.clear() }
+  }, [props.sessionId])
+  useEffect(() => {
+    const composer = composerRef.current
+    if (!composer) return
+    function insert(asset: StudioAsset, selection: SelectedAsset) {
+      if (referenceSession.current !== props.sessionId || !composerRef.current) return
+      if (!asset.versions.some(version => version.id === selection.assetVersionId)) throw new Error('引用资产版本不存在')
+      if (!newStudioAssetReferences([selection], composerRef.current.serialize().selectedAssets).length) return
+      composerRef.current.insertReference({ kind: 'asset', id: asset.id, label: asset.name, versionId: selection.assetVersionId })
+    }
+    for (const selection of newStudioAssetReferences(props.selectedAssets, composer.serialize().selectedAssets)) {
+      const key = `${selection.assetId}:${selection.assetVersionId}`
+      if (pendingAssetReferences.current.has(key)) continue
+      const asset = props.assets.find(item => item.id === selection.assetId && item.versions.some(version => version.id === selection.assetVersionId))
+      if (asset) { insert(asset, selection); continue }
+      pendingAssetReferences.current.add(key)
+      void getStudioAsset(selection.assetId).then(found => insert(found, selection)).catch(error => {
+        if (referenceSession.current === props.sessionId) onRunError(String(error))
+      }).finally(() => pendingAssetReferences.current.delete(key))
+    }
+  }, [props.selectedAssets, props.assets, props.sessionId, onRunError])
   const [sendingImages, setSendingImages] = useState(false)
   const sendingImagesRef = useRef(false)
   const queuedMessagesRef = useRef(queuedMessages)
@@ -667,10 +708,12 @@ function StudioChatSurface({
     props.latestRun?.status === 'waiting_clarification' ||
     props.latestRun?.status === 'waiting_workflow' ||
     clarificationPending || workflowPending
-  const removeQueuedMessage = useCallback((id: string) => {
+  const removeQueuedMessage = useCallback((id: string, dispatched = false) => {
+    const editorRequest = queuedMessagesRef.current.find(message => message.id === id)?.runConfig.editorRequest
+    if (editorRequest && !dispatched) props.onEditorRequestChange?.({ ...editorRequest, sessionId: props.sessionId, status: 'cancelled' })
     queuedMessagesRef.current = queuedMessagesRef.current.filter((message) => message.id !== id)
     onQueuedMessagesChange((current) => current.filter((message) => message.id !== id))
-  }, [onQueuedMessagesChange])
+  }, [onQueuedMessagesChange, props.onEditorRequestChange, props.sessionId])
   const isStreaming = isRunning || serverRunning
   const waitingFor = workflowPending || props.latestRun?.status === 'waiting_workflow'
     ? 'workflow'
@@ -783,6 +826,7 @@ function StudioChatSurface({
   const dispatchMessage = useCallback((message: QueuedMessage) => {
     if (!queuedRunRef.current) queuedRunRef.current = { previousRunId: agent.activeStudioRunId() }
     try {
+      if (message.runConfig.editorRequest) props.onEditorRequestChange?.({ ...message.runConfig.editorRequest, sessionId: props.sessionId, status: 'submitting' })
       agent.prepareNextRun(message.runConfig)
       const composer = aui.thread.composer()
       composer.setText(message.value.text)
@@ -792,10 +836,14 @@ function StudioChatSurface({
       setLiveMessage({ previousUserMessageId: latestUserMessageId, parts: message.value.parts })
     } catch (error) {
       queuedRunRef.current = null
+      if (message.runConfig.editorRequest) props.onEditorRequestChange?.({ ...message.runConfig.editorRequest, sessionId: props.sessionId, status: 'failed', error: error instanceof Error ? error.message : String(error) })
       throw error
     }
-  }, [agent, aui, latestUserMessageId, onRunStart])
+  }, [agent, aui, latestUserMessageId, onRunStart, props.onEditorRequestChange, props.sessionId])
   const send = async (prompt?: string, files: FileUIPart[] = []) => {
+    if (pendingAssetReferences.current.size) { onRunError('正在读取引用资产，请稍后发送。'); return }
+    if (props.materialContextPending) { onRunError('素材创作对象尚未读取完成。'); return }
+    const materialContext = structuredClone(props.materialContext)
     const value = prompt === undefined
       ? composerRef.current?.serialize()
       : { text: prompt, parts: [{ type: 'text' as const, text: prompt }], selectedSkillIds: [], selectedAssets: [] }
@@ -874,7 +922,7 @@ function StudioChatSurface({
     const queuedMessage: QueuedMessage = {
       id: crypto.randomUUID(),
       value: { ...value, text, parts, selectedAssets },
-      runConfig: { modelConfigId: selectedModel?.id ?? '', locale: i18n.language.startsWith('en') ? 'en' : 'zh', permissionMode: props.permissionMode, selectedSkillIds: value.selectedSkillIds, selectedAssets, messageParts: parts },
+      runConfig: { modelConfigId: selectedModel?.id ?? '', locale: i18n.language.startsWith('en') ? 'en' : 'zh', permissionMode: props.permissionMode, selectedSkillIds: value.selectedSkillIds, selectedAssets, messageParts: parts, materialContext },
     }
     if (runActive || queuedRunRef.current || queuedMessages.length > 0) {
       onQueuedMessagesChange((current) => [...current, queuedMessage])
@@ -883,6 +931,27 @@ function StudioChatSurface({
     }
     composerRef.current?.clear()
   }
+
+  useEffect(() => {
+    props.onEditorSenderChange?.(request => {
+      if (!modelReady || !selectedModel) throw new Error('选择可用模型后生成剧本')
+      const skill = props.skills.find(skill => skill.id === request.skillId && skill.enabled)
+      if (!skill) throw new Error('剧本 Skill 不可用，请重新选择')
+      const parts: StudioComposerPart[] = [{ type: 'skill_ref', skill_id: skill.id, version: skill.version, name: skill.name }, { type: 'text', text: request.text }]
+      const editorRequest = { id: crypto.randomUUID(), label: request.label }
+      const message: QueuedMessage = {
+        id: editorRequest.id,
+        value: { text: request.text, parts, selectedSkillIds: [skill.id], selectedAssets: [] },
+        runConfig: { modelConfigId: selectedModel.id, locale: i18n.language.startsWith('en') ? 'en' : 'zh', permissionMode: props.permissionMode, selectedSkillIds: [skill.id], selectedAssets: [], messageParts: parts, videoEditContext: request.videoEditContext, editorRequest },
+      }
+      if (runActive || queuedRunRef.current || queuedMessages.length > 0) {
+        props.onEditorRequestChange?.({ ...editorRequest, sessionId: props.sessionId, status: 'queued' })
+        onQueuedMessagesChange(current => [...current, message])
+      }
+      else dispatchMessage(message)
+    })
+    return () => props.onEditorSenderChange?.(undefined)
+  }, [props.onEditorSenderChange, props.onEditorRequestChange, props.sessionId, props.skills, props.permissionMode, modelReady, selectedModel, runActive, queuedMessages.length, dispatchMessage, onQueuedMessagesChange])
 
   const transcriptParts = new Map(
     props.transcript?.messages.filter((message) => message.role === 'user' && message.parts).map((message) => [message.id, message.parts!]) ?? []
@@ -952,7 +1021,7 @@ function StudioChatSurface({
       if (!queuedMessagesRef.current.some((message) => message.id === next.id)) { queuedRunRef.current = null; return }
       try {
         dispatchMessage(next)
-        removeQueuedMessage(next.id)
+        removeQueuedMessage(next.id, true)
       } catch (error) {
         queuedRunRef.current = null
         onRunError(error instanceof Error ? error.message : '发送消息失败')
@@ -974,7 +1043,7 @@ function StudioChatSurface({
       if (!queuedMessagesRef.current.some((item) => item.id === message.id)) { queuedRunRef.current = null; return }
       wasRunActiveRef.current = false
       dispatchMessage(message)
-      removeQueuedMessage(message.id)
+      removeQueuedMessage(message.id, true)
     } catch (error) {
       queuedRunRef.current = null
       onRunError(error instanceof Error ? error.message : '立即发送失败')
@@ -1031,10 +1100,7 @@ function StudioChatSurface({
       <Conversation className='min-h-0 flex-1'>
         <ConversationContent
           scrollClassName='studio-scrollbar'
-          className={cn(
-            'mx-auto min-h-full w-full max-w-3xl gap-5 px-5 pt-8',
-            clarificationPending || workflowPending ? 'pb-8' : queuedMessages.length > 1 ? 'pb-104' : queuedMessages.length === 1 ? 'pb-64' : 'pb-38'
-          )}
+          className='mx-auto min-h-full w-full max-w-3xl gap-5 px-5 pt-8 pb-4'
         >
           <ExpertTaskProgress tasks={props.expertTasks ?? []} onReturn={(_stepId, title) => send(`返回「${title}」，重新检查当前资料。`)} />
           {props.expertId ? <div className='text-sm text-muted-foreground'>{props.expertName} · v{props.expertVersion}</div> : null}
@@ -1113,10 +1179,10 @@ function StudioChatSurface({
           target={props.locateMessage}
           messageCount={messages.length}
         />
-        <StudioTurnNavigator messages={messages} composerRef={composerOverlayRef} />
+        <StudioTurnNavigator messages={messages} />
         <ConversationScrollButton
           aria-label='跳转至最新消息'
-          className={clarificationPending || workflowPending ? 'bottom-6' : queuedMessages.length > 1 ? 'bottom-104' : queuedMessages.length === 1 ? 'bottom-64' : 'bottom-48'}
+          className='bottom-4'
         />
       </Conversation>
       {activeClarification ? (
@@ -1158,18 +1224,14 @@ function StudioChatSurface({
         </div>
       ) : null}
       <div
-        ref={composerOverlayRef}
+        ref={composerContainerRef}
         data-slot='studio-composer'
         className={cn(
-          'pointer-events-none absolute inset-x-0 bottom-0 z-20',
+          'z-20 shrink-0',
           (clarificationPending || workflowPending) && 'hidden'
         )}
       >
-        <div className='mx-auto w-full max-w-3xl px-5'>
-          <div
-            aria-hidden='true'
-            className='h-6 bg-gradient-to-t from-card to-transparent'
-          />
+        <div className='mx-auto w-full max-w-3xl px-5 pb-2'>
           <StudioMessageQueue
             messages={queuedMessages}
             availableModelIds={availableModels.map((model) => model.id)}
@@ -1207,7 +1269,7 @@ function StudioChatSurface({
                     suggestionLoading={activeSuggestion?.kind === 'asset' ? suggestedLibraryAssets.isPending || suggestedLibraryAssets.isFetching : activeSuggestion?.kind === 'workflow' && suggestedWorkflows.isPending}
                     suggestionError={activeSuggestion?.kind === 'asset' ? suggestedLibraryAssets.isError : activeSuggestion?.kind === 'workflow' && suggestedWorkflows.isError}
                     onSubmit={() =>
-                      composerOverlayRef.current
+                      composerContainerRef.current
                         ?.querySelector('form')
                         ?.requestSubmit()
                     }
@@ -1223,8 +1285,7 @@ function StudioChatSurface({
                     }
                   />
                 </PromptInputBody>
-                <PromptInputFooter className='flex-wrap sm:flex-nowrap'>
-                  <PromptInputTools>
+                <StudioComposerFooter tools={<>
                     <StudioImagePicker
                       unsupported={Boolean(
                         selectedModel && !selectedModel.capabilities.vision
@@ -1259,12 +1320,10 @@ function StudioChatSurface({
                       disabled={approvalPending || clarificationPending}
                       onSelect={(workflow) => composerRef.current?.insertReference({ kind: 'workflow', id: workflow.id, label: workflow.name })}
                     />
-                    <PermissionPicker
+                  </>} permission={<PermissionPicker
                       value={props.permissionMode}
                       onChange={props.onPermissionChange}
-                    />
-                  </PromptInputTools>
-                  <PromptInputTools className='max-sm:w-full max-sm:justify-between'>
+                    />}>
                     <ModelPicker
                       disabled={Boolean(props.expertId)}
                       models={availableModels}
@@ -1272,11 +1331,11 @@ function StudioChatSurface({
                       onChange={props.onModelChange}
                     />
                     <PromptInputSubmit
-                      className='size-9 rounded-full'
-                      size='icon-sm'
+                      className='rounded-full'
+                      size='icon-xs'
                       variant='default'
                       aria-label={sendingImages ? '正在上传图片' : '发送消息'}
-                      disabled={!modelReady || sendingImages || approvalPending || clarificationPending || workflowPending}
+                      disabled={!modelReady || props.materialContextPending || sendingImages || approvalPending || clarificationPending || workflowPending}
                     >
                       {sendingImages ? <Spinner data-icon='inline-start' /> : <ArrowUp data-icon='inline-start' />}
                     </PromptInputSubmit>
@@ -1300,11 +1359,10 @@ function StudioChatSurface({
                             )
                           })
                     }}><Square fill='currentColor' stroke='none' /></Button> : null}
-                  </PromptInputTools>
-                </PromptInputFooter>
+                </StudioComposerFooter>
               </PromptInput>
             </div>
-            <p className='mt-1 text-center text-[10px] text-muted-foreground/70'>
+            <p className='mt-1 select-none text-center text-[10px] text-muted-foreground/70'>
               内容由 AI 生成，请仔细甄别
             </p>
           </div>
@@ -2021,7 +2079,6 @@ const toolNames: Record<string, string> = {
   list_session_assets: '查看会话资产',
   read_asset: '读取资产',
   update_text_asset: '更新文本资产',
-  edit_session_flow: '编辑制作流程',
   load_skill: '读取技能',
   ask_clarification: '询问用户',
   install_skill: '安装技能',
@@ -2033,7 +2090,7 @@ function StudioMessageLocator({
   target,
   messageCount,
 }: {
-  target?: { id: string; request: number }
+  target?: { id: string; alternateId?: string; request: number }
   messageCount: number
 }) {
   const { scrollRef, stopScroll } = useStickToBottomContext()
@@ -2045,7 +2102,7 @@ function StudioMessageLocator({
       const scroll = scrollRef.current
       const anchor = Array.from(
         scroll?.querySelectorAll<HTMLElement>('[data-studio-turn-id]') ?? []
-      ).find((element) => element.dataset.studioTurnId === target.id)
+      ).find((element) => element.dataset.studioTurnId === target.id || element.dataset.studioTurnId === target.alternateId)
       if (!scroll || !anchor) return
       stopScroll()
       const top =

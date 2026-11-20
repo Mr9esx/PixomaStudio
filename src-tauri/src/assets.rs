@@ -7,9 +7,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 use sqlx::{Row, Sqlite, Transaction};
 use std::{
+    borrow::Cow,
     collections::HashSet,
-    fs::OpenOptions,
-    io::Write,
+    fs::File,
+    io::{self, Read},
     path::{Path, PathBuf},
 };
 use uuid::Uuid;
@@ -52,11 +53,57 @@ pub(crate) fn digest(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum AssetContent<'a> {
+    Bytes(&'a [u8]),
+    File(&'a Path),
+}
+
+impl<'a> AssetContent<'a> {
+    fn reader(self) -> Result<Box<dyn Read + Send + 'a>> {
+        Ok(match self {
+            Self::Bytes(bytes) => Box::new(io::Cursor::new(bytes)),
+            Self::File(path) => Box::new(File::open(path)?),
+        })
+    }
+
+    fn len(self) -> Result<u64> {
+        match self {
+            Self::Bytes(bytes) => Ok(bytes.len() as u64),
+            Self::File(path) => {
+                let metadata = std::fs::metadata(path)?;
+                if !metadata.is_file() { return Err(Error::Invalid("资产来源需要文件")); }
+                Ok(metadata.len())
+            }
+        }
+    }
+
+    fn digest(self) -> Result<String> {
+        if let Self::Bytes(bytes) = self { return Ok(digest(bytes)); }
+        let mut reader = self.reader()?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0_u8; 65536];
+        loop {
+            let count = reader.read(&mut buffer)?;
+            if count == 0 { break; }
+            hasher.update(&buffer[..count]);
+        }
+        Ok(format!("{:x}", hasher.finalize()))
+    }
+
+    fn header(self) -> Result<Cow<'a, [u8]>> {
+        if let Self::Bytes(bytes) = self { return Ok(Cow::Borrowed(bytes)); }
+        let mut header = Vec::new();
+        self.reader()?.take(8192).read_to_end(&mut header)?;
+        Ok(Cow::Owned(header))
+    }
+}
+
 pub(crate) struct AssetCreation<'a> {
     pub session_id: Option<&'a str>,
     pub project_id: Option<&'a str>,
     pub name: &'a str,
-    pub bytes: &'a [u8],
+    pub content: AssetContent<'a>,
     pub origin: &'a str,
     pub content_origin: &'a str,
     pub request_id: &'a str,
@@ -67,17 +114,16 @@ impl Store {
     async fn save_blob_in(
         &self,
         transaction: &mut Transaction<'_, Sqlite>,
-        account: &str,
-        bytes: &[u8],
+        content: AssetContent<'_>,
     ) -> Result<String> {
-        Self::check_account(account)?;
-        if bytes.len() > MAX_ASSET_BYTES {
+        let size = content.len()?;
+        if matches!(content, AssetContent::Bytes(_)) && size > MAX_ASSET_BYTES as u64 {
             return Err(Error::Invalid("文件超过 256 MiB"));
         }
-        let hash = digest(bytes);
-        let root = self.root.join("assets");
-        let parent = root.join(digest(account.as_bytes()));
-        if root.is_symlink() || parent.is_symlink() {
+        let size = i64::try_from(size).map_err(|_| Error::Invalid("资产文件超过大小范围"))?;
+        let hash = content.digest()?;
+        let parent = self.root.join("assets");
+        if parent.is_symlink() {
             return Err(Error::Invalid("资产目录不能使用符号链接"));
         }
         std::fs::create_dir_all(&parent)?;
@@ -86,45 +132,32 @@ impl Store {
             return Err(Error::Invalid("资产目录超出授权范围"));
         }
         let path = parent.join(&hash);
-        sqlx::query("INSERT INTO blobs(account_id,digest,path,size_bytes,created_at) VALUES(?,?,?,?,?) ON CONFLICT(account_id,digest) DO NOTHING")
-            .bind(account).bind(&hash).bind(path.to_str().ok_or(Error::Invalid("文件路径编码错误"))?)
-            .bind(bytes.len() as i64).bind(timestamp()?).execute(&mut **transaction).await?;
+        sqlx::query("INSERT INTO blobs(digest,path,size_bytes,created_at) VALUES(?,?,?,?) ON CONFLICT(digest) DO NOTHING")
+            .bind(&hash).bind(path.to_str().ok_or(Error::Invalid("文件路径编码错误"))?)
+            .bind(size).bind(timestamp()?).execute(&mut **transaction).await?;
         if path.exists() {
-            if path.is_symlink() || digest(&std::fs::read(&path)?) != hash {
+            if path.is_symlink() || AssetContent::File(&path).digest()? != hash {
                 return Err(Error::Invalid("资产文件内容校验失败"));
             }
             return Ok(hash);
         }
-        let staging = parent.join(format!("{}.pending", Uuid::new_v4()));
-        let mut options = OpenOptions::new();
-        options.write(true).create_new(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
+        let mut staging = tempfile::Builder::new().suffix(".pending").tempfile_in(parent)?;
+        let written = io::copy(&mut content.reader()?, &mut staging)?;
+        staging.as_file().sync_all()?;
+        if written != size as u64 || AssetContent::File(staging.path()).digest()? != hash {
+            return Err(Error::Invalid("资产文件内容校验失败"));
         }
-        let mut file = options.open(&staging)?;
-        file.write_all(bytes)?;
-        file.sync_all()?;
-        std::fs::rename(staging, &path)?;
+        staging.persist(path).map_err(|error| Error::Io(error.error))?;
         Ok(hash)
     }
 
     pub(crate) async fn collect_unreferenced_asset_files(&self) -> Result<()> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let references = sqlx::query("SELECT account_id,digest FROM asset_versions UNION SELECT account_id,json_extract(metadata,'$.poster_digest') AS digest FROM asset_versions WHERE json_type(metadata,'$.poster_digest')='text'")
+        let references: Vec<String> = sqlx::query_scalar("SELECT digest FROM asset_versions UNION SELECT json_extract(metadata,'$.poster_digest') AS digest FROM asset_versions WHERE json_type(metadata,'$.poster_digest')='text'")
             .fetch_all(&mut *transaction)
             .await?;
-        let referenced: HashSet<(String, String)> = references
-            .iter()
-            .map(|row| {
-                (
-                    digest(row.get::<String, _>("account_id").as_bytes()),
-                    row.get("digest"),
-                )
-            })
-            .collect();
-        sqlx::query("DELETE FROM blobs WHERE NOT EXISTS (SELECT 1 FROM asset_versions v WHERE v.account_id=blobs.account_id AND (v.digest=blobs.digest OR json_extract(v.metadata,'$.poster_digest')=blobs.digest))")
+        let referenced: HashSet<String> = references.into_iter().collect();
+        sqlx::query("DELETE FROM blobs WHERE NOT EXISTS (SELECT 1 FROM asset_versions v WHERE v.digest=blobs.digest OR json_extract(v.metadata,'$.poster_digest')=blobs.digest)")
             .execute(&mut *transaction).await?;
         let root = self.root.join("assets");
         if root.try_exists()? {
@@ -134,33 +167,20 @@ impl Store {
             let is_digest = |value: &str| {
                 value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
             };
-            for account in std::fs::read_dir(root)? {
-                let account = account?;
-                let name = account.file_name();
-                let Some(account_name) = name.to_str().filter(|name| is_digest(name)) else {
-                    continue;
-                };
-                if !account.file_type()?.is_dir() {
+            for file in std::fs::read_dir(root)? {
+                let file = file?;
+                if !file.file_type()?.is_file() {
                     continue;
                 }
-                for file in std::fs::read_dir(account.path())? {
-                    let file = file?;
-                    if !file.file_type()?.is_file() {
-                        continue;
-                    }
-                    let name = file.file_name();
-                    let Some(name) = name.to_str() else {
-                        continue;
-                    };
-                    let pending = name
-                        .strip_suffix(".pending")
-                        .is_some_and(|name| Uuid::parse_str(name).is_ok());
-                    if pending
-                        || (is_digest(name)
-                            && !referenced.contains(&(account_name.to_owned(), name.to_owned())))
-                    {
-                        std::fs::remove_file(file.path())?;
-                    }
+                let name = file.file_name();
+                let Some(name) = name.to_str() else {
+                    continue;
+                };
+                let pending = name
+                    .strip_suffix(".pending")
+                    .is_some_and(|name| Uuid::parse_str(name).is_ok());
+                if pending || (is_digest(name) && !referenced.contains(name)) {
+                    std::fs::remove_file(file.path())?;
                 }
             }
         }
@@ -170,13 +190,16 @@ impl Store {
 
     async fn completed_asset_operation(
         &self,
-        account: &str,
         request: &str,
         operation: &str,
         fingerprint: &str,
     ) -> Result<Option<Asset>> {
-        let row = sqlx::query("SELECT asset_id,operation,request_digest FROM asset_operations WHERE account_id=? AND request_id=?")
-            .bind(account).bind(request).fetch_optional(&self.pool).await?;
+        let row = sqlx::query(
+            "SELECT asset_id,operation,request_digest FROM asset_operations WHERE request_id=?",
+        )
+        .bind(request)
+        .fetch_optional(&self.pool)
+        .await?;
         let Some(row) = row else {
             return Ok(None);
         };
@@ -186,17 +209,11 @@ impl Store {
             return Err(Error::Invalid("请求标识已用于其他操作"));
         }
         Ok(Some(
-            self.get_asset(account, &row.get::<String, _>("asset_id"))
-                .await?,
+            self.get_asset(&row.get::<String, _>("asset_id")).await?,
         ))
     }
 
-    pub async fn import_asset(
-        &self,
-        account: &str,
-        session_id: &str,
-        input: &Path,
-    ) -> Result<Asset> {
+    pub async fn import_asset(&self, session_id: &str, input: &Path) -> Result<Asset> {
         let metadata = std::fs::metadata(input)?;
         if !metadata.is_file() || metadata.len() > MAX_ASSET_BYTES as u64 {
             return Err(Error::Invalid("文件类型或大小无效"));
@@ -206,7 +223,6 @@ impl Store {
             .and_then(|name| name.to_str())
             .ok_or(Error::Invalid("文件名称无效"))?;
         self.create_asset_bytes(
-            account,
             Some(session_id),
             name,
             &std::fs::read(input)?,
@@ -218,19 +234,17 @@ impl Store {
 
     pub async fn create_text_asset(
         &self,
-        account: &str,
         session_id: &str,
         name: &str,
         content: &str,
         request_id: &str,
     ) -> Result<Asset> {
-        self.create_text_asset_with_origin(account, session_id, name, content, request_id, "user")
+        self.create_text_asset_with_origin(session_id, name, content, request_id, "user")
             .await
     }
 
     pub(crate) async fn create_text_asset_with_origin(
         &self,
-        account: &str,
         session_id: &str,
         name: &str,
         content: &str,
@@ -246,73 +260,125 @@ impl Store {
         } else {
             format!("{}.md", name.trim())
         };
-        self.create_asset_details(
-            account,
-            AssetCreation {
-                session_id: Some(session_id),
-                project_id: None,
-                name: &name,
-                bytes: content.as_bytes(),
-                origin,
-                content_origin: "manual",
-                request_id,
-                source_modified_at: None,
-            },
-        )
-        .await
+        self.create_asset_details(AssetCreation {
+            session_id: Some(session_id),
+            project_id: None,
+            name: &name,
+            content: AssetContent::Bytes(content.as_bytes()),
+            origin,
+            content_origin: "manual",
+            request_id,
+            source_modified_at: None,
+        })
+        .await.map(|(asset, _)| asset)
     }
 
     pub async fn create_asset_bytes(
         &self,
-        account: &str,
         session_id: Option<&str>,
         name: &str,
         bytes: &[u8],
         origin: &str,
         request_id: &str,
     ) -> Result<Asset> {
-        self.create_asset_details(
-            account,
-            AssetCreation {
-                session_id,
-                project_id: None,
-                name,
-                bytes,
-                origin,
-                content_origin: origin,
-                request_id,
-                source_modified_at: None,
-            },
-        )
-        .await
+        self.create_asset_details(AssetCreation {
+            session_id,
+            project_id: None,
+            name,
+            content: AssetContent::Bytes(bytes),
+            origin,
+            content_origin: origin,
+            request_id,
+            source_modified_at: None,
+        })
+        .await.map(|(asset, _)| asset)
     }
 
-    pub(crate) async fn create_asset_details(
+    pub async fn ensure_video_boundary_outputs(
         &self,
-        account: &str,
-        input: AssetCreation<'_>,
-    ) -> Result<Asset> {
+        session_id: Option<&str>,
+        execution_id: &str,
+        asset_id: &str,
+        version_id: &str,
+        output_index: i64,
+    ) -> Result<Vec<Value>> {
+        let local: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM local_executions WHERE id=?)")
+            .bind(execution_id).fetch_one(&self.pool).await?;
+        if !local {
+            let online: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM online_executions WHERE id=?)")
+                .bind(execution_id).fetch_one(&self.pool).await?;
+            if !online { return Err(Error::NotFound); }
+        }
+        let asset = self.get_asset(asset_id).await?;
+        if asset.kind != "video" {
+            return Err(Error::Invalid("首尾帧来源需要视频资产"));
+        }
+        let version = asset.versions.iter().find(|version| version.id == version_id)
+            .ok_or(Error::NotFound)?;
+        self.ensure_video_metadata(asset_id, version_id).await?;
+        let bytes = self.read_asset(asset_id, version_id).await?;
+        let frames = self.extract_video_boundary_frames(&bytes).await?;
+        let mut outputs = Vec::new();
+        for (role, bytes) in ["first_frame", "last_frame"].into_iter().zip(frames) {
+            let label = if role == "first_frame" { "首帧" } else { "尾帧" };
+            let frame = self.create_asset_details(AssetCreation {
+                session_id, project_id: None, name: &format!("{} · {label}.png", asset.name),
+                content: AssetContent::Bytes(&bytes), origin: "workflow", content_origin: "derived",
+                request_id: &format!("video-frame:{version_id}:{role}"), source_modified_at: None,
+            }).await?.0;
+            let frame_version = frame.versions.first().ok_or(Error::State("首尾帧资产版本缺失"))?;
+            self.place_video_generation_output(execution_id,&frame.id,&frame_version.id).await?;
+            let reference = serde_json::json!({"asset_id":frame.id,"version_id":frame_version.id,"url":frame_version.content_url});
+            let source = serde_json::json!({"asset_id":asset_id,"version_id":version.id,"role":role});
+            let output_id = format!("boundary:{version_id}:{role}");
+            let hash = digest(&bytes);
+            let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+            sqlx::query("UPDATE asset_versions SET metadata=json_set(metadata,?,json(?)) WHERE asset_id=? AND id=?")
+                .bind(format!("$.{role}")).bind(reference.to_string()).bind(asset_id).bind(version_id)
+                .execute(&mut *transaction).await?;
+            sqlx::query("UPDATE asset_versions SET metadata=json_set(metadata,'$.source_video',json(?)) WHERE asset_id=? AND id=?")
+                .bind(source.to_string()).bind(&frame.id).bind(&frame_version.id)
+                .execute(&mut *transaction).await?;
+            if local {
+                sqlx::query("INSERT INTO local_execution_outputs(execution_id,output_id,field_key,output_index,sha256,size_bytes,media_type,asset_id,asset_version_id) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(execution_id,output_id) DO NOTHING")
+                    .bind(execution_id).bind(&output_id).bind(role).bind(output_index).bind(&hash)
+                    .bind(bytes.len() as i64).bind("image/png").bind(&frame.id).bind(&frame_version.id)
+                    .execute(&mut *transaction).await?;
+            }
+            transaction.commit().await?;
+            outputs.push(serde_json::json!({"output_id":output_id,"field_key":role,"index":output_index,
+                "sha256":hash,"size_bytes":bytes.len(),"media_type":"image/png","asset_id":frame.id,"asset_version_id":frame_version.id}));
+        }
+        Ok(outputs)
+    }
+
+    pub(crate) async fn create_asset_details(&self, input: AssetCreation<'_>) -> Result<(Asset, bool)> {
         let AssetCreation {
             session_id,
             project_id,
             name,
-            bytes,
+            content,
             origin,
             content_origin,
             request_id,
             source_modified_at,
         } = input;
-        Self::check_account(account)?;
         required(name, "资产名称不能为空")?;
         required(request_id, "请求标识不能为空")?;
-        if bytes.len() > MAX_ASSET_BYTES {
+        let size = content.len()?;
+        if matches!(content, AssetContent::Bytes(_)) && size > MAX_ASSET_BYTES as u64 {
             return Err(Error::Invalid("文件超过 256 MiB"));
         }
+        if matches!(content, AssetContent::File(_)) && content_origin != "video_export" {
+            return Err(Error::Invalid("文件登记仅用于视频导出"));
+        }
+        let size = i64::try_from(size).map_err(|_| Error::Invalid("资产文件超过大小范围"))?;
+        let bytes = content.header()?;
         if session_id.is_some() && project_id.is_some() {
             return Err(Error::Invalid("会话资产不能指定其他项目"));
         }
         if let Some(project) = project_id.filter(|id| !id.is_empty()) {
-            self.get_project(account, project).await?;
+            self.get_project(project).await?;
         }
         if let Some(date) = source_modified_at {
             time::OffsetDateTime::parse(date, &time::format_description::well_known::Rfc3339)
@@ -322,11 +388,13 @@ impl Store {
             return Err(Error::Invalid("资产来源无效"));
         }
         let session = if let Some(id) = session_id {
-            Some(self.get_session(account, id).await?)
+            Some(self.get_session(id).await?)
         } else {
             None
         };
-        let hash = digest(bytes);
+        let hash = content.digest()?;
+        // ponytail: 导入按应用串行处理；需要并行导入时改为按项目加锁。
+        let _upload_guard = if content_origin == "upload" { Some(self.asset_uploads.lock().await) } else { None };
         let fingerprint = digest(&serde_json::to_vec(&(
             session_id,
             project_id,
@@ -336,19 +404,50 @@ impl Store {
             content_origin,
             source_modified_at,
         ))?);
-        if let Some(asset) = self
-            .completed_asset_operation(account, request_id, "create", &fingerprint)
-            .await?
-        {
-            return Ok(asset);
-        }
-        let mime = infer::get(bytes)
+        let mime = infer::get(&bytes)
             .map(|kind| kind.mime_type().to_owned())
             .unwrap_or_else(|| {
                 mime_guess::from_path(name)
                     .first_or_octet_stream()
                     .to_string()
             });
+        if let Some(mut asset) = self
+            .completed_asset_operation(request_id, "create", &fingerprint)
+            .await?
+        {
+            if content_origin == "upload" {
+                asset.current_version = sqlx::query_scalar("SELECT version FROM asset_versions WHERE asset_id=? AND digest=? AND mime_type=? ORDER BY version LIMIT 1")
+                    .bind(&asset.id).bind(&hash).bind(&mime).fetch_optional(&self.pool).await?
+                    .ok_or(Error::State("导入内容版本缺失"))?;
+            }
+            return Ok((asset, true));
+        }
+        let target_project = session.as_ref().and_then(|session| session.project_id.clone())
+            .or_else(|| project_id.filter(|id| !id.is_empty()).map(str::to_owned));
+        if content_origin == "upload" {
+            let existing: Option<(String, String, i64)> = sqlx::query_as("SELECT v.asset_id,v.id,v.version FROM project_assets p JOIN asset_versions v ON v.asset_id=p.asset_id WHERE coalesce(p.project_id,'')=? AND p.archived_at IS NULL AND v.digest=? AND v.mime_type=? ORDER BY p.added_at,p.id,v.version LIMIT 1")
+                .bind(target_project.as_deref().unwrap_or("")).bind(&hash).bind(&mime).fetch_optional(&self.pool).await?;
+            if let Some((asset_id, version_id, version)) = existing {
+                if digest(&self.read_asset(&asset_id, &version_id).await?) != hash { return Err(Error::State("资产内容校验失败")); }
+                let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+                let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(request_id,operation,request_digest,asset_id) VALUES(?,'create',?,?) ON CONFLICT(request_id) DO NOTHING RETURNING asset_id")
+                    .bind(request_id).bind(&fingerprint).bind(&asset_id).fetch_optional(&mut *transaction).await?;
+                if recorded.is_none() {
+                    transaction.rollback().await?;
+                    return self.completed_asset_operation(request_id, "create", &fingerprint).await?
+                        .map(|asset| (asset, true)).ok_or(Error::State("重复资产请求缺少保存结果"));
+                }
+                if let Some(session) = &session {
+                    sqlx::query("INSERT INTO asset_usages(id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,'uploaded',?) ON CONFLICT(session_id,asset_id,asset_version_id,usage_kind) DO NOTHING")
+                        .bind(Uuid::new_v4().to_string()).bind(&session.id).bind(&asset_id).bind(&version_id)
+                        .bind(&session.title).bind(timestamp()?).execute(&mut *transaction).await?;
+                }
+                transaction.commit().await?;
+                let mut asset = self.get_asset(&asset_id).await?;
+                asset.current_version = version;
+                return Ok((asset, true));
+            }
+        }
         let kind = if mime.starts_with("image/") {
             "image"
         } else if mime.starts_with("video/") {
@@ -362,18 +461,25 @@ impl Store {
         } else {
             "file"
         };
-        let (analysis, poster) = match kind {
-            "image" => (Some(crate::asset_analysis::analyze_image(bytes)?), None),
+        if matches!(content, AssetContent::File(_)) && kind != "video" {
+            return Err(Error::Invalid("导出结果需要视频文件"));
+        }
+        let (analysis, poster, media_info) = match kind {
+            "image" => (Some(crate::asset_analysis::analyze_image(&bytes)?), None, None),
             "video" => {
-                let (width, height, palette, poster) = self.analyze_video(bytes).await?;
-                (Some((width, height, palette)), Some(poster))
+                let (width, height, palette, poster, metadata) = match content {
+                    AssetContent::Bytes(bytes) => self.analyze_video(bytes).await?,
+                    AssetContent::File(path) => self.analyze_video_file(path).await?,
+                };
+                (Some((width, height, palette)), Some(poster), Some(metadata))
             }
-            _ => (None, None),
+            "audio" => (None, None, Some(self.probe_audio_metadata(&bytes).await?)),
+            _ => (None, None, None),
         };
         let dimensions = analysis
             .as_ref()
             .map(|(width, height, _)| (*width, *height));
-        let format = infer::get(bytes)
+        let format = infer::get(&bytes)
             .map(|kind| kind.extension().to_owned())
             .or_else(|| {
                 Path::new(name)
@@ -386,51 +492,50 @@ impl Store {
         let version_id = Uuid::new_v4().to_string();
         let now = timestamp()?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        self.save_blob_in(&mut transaction, account, bytes).await?;
+        let saved_hash = self.save_blob_in(&mut transaction, content).await?;
+        if saved_hash != hash { return Err(Error::Invalid("资产内容在登记期间发生变化")); }
         let mut metadata = serde_json::json!({ "source_modified_at": source_modified_at, "palette": analysis.map(|(_, _, palette)| palette) });
-        if let Some(poster) = poster {
-            metadata["poster_digest"] = serde_json::json!(
-                self.save_blob_in(&mut transaction, account, &poster)
-                    .await?
-            );
+        if let Some(info) = media_info {
+            metadata["duration"] = info["duration"].clone();
+            if kind == "video" { metadata["fps"] = info["fps"].clone(); }
         }
-        sqlx::query("INSERT INTO assets(id,account_id,name,kind,origin,current_version,created_at,updated_at) VALUES(?,?,?,?,?,1,?,?)")
-            .bind(&id).bind(account).bind(name).bind(kind).bind(origin).bind(&now).bind(&now).execute(&mut *transaction).await?;
-        sqlx::query("INSERT INTO asset_versions(id,account_id,asset_id,version,digest,mime_type,size_bytes,format,width_px,height_px,content_origin,created_at,metadata) VALUES(?,?,?,1,?,?,?,?,?,?,?,?,?)")
-            .bind(&version_id).bind(account).bind(&id).bind(&hash).bind(&mime).bind(bytes.len() as i64).bind(&format)
+        if let Some(poster) = poster {
+            metadata["poster_digest"] =
+                serde_json::json!(self.save_blob_in(&mut transaction, AssetContent::Bytes(&poster)).await?);
+        }
+        sqlx::query("INSERT INTO assets(id,name,kind,origin,current_version,created_at,updated_at) VALUES(?,?,?,?,1,?,?)")
+            .bind(&id).bind(name).bind(kind).bind(origin).bind(&now).bind(&now).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO asset_versions(id,asset_id,version,digest,mime_type,size_bytes,format,width_px,height_px,content_origin,created_at,metadata) VALUES(?,?,1,?,?,?,?,?,?,?,?,?)")
+            .bind(&version_id).bind(&id).bind(&hash).bind(&mime).bind(size).bind(&format)
             .bind(dimensions.map(|(width, _)| width as i64)).bind(dimensions.map(|(_, height)| height as i64))
             .bind(content_origin).bind(&now).bind(metadata.to_string()).execute(&mut *transaction).await?;
-        let project_id = session
-            .as_ref()
-            .and_then(|session| session.project_id.clone())
-            .or_else(|| project_id.filter(|id| !id.is_empty()).map(str::to_owned));
         if let Some(session) = session {
-            sqlx::query("INSERT INTO asset_usages(id,account_id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,?,?,?)")
-                .bind(Uuid::new_v4().to_string()).bind(account).bind(&session.id).bind(&id).bind(&version_id)
+            sqlx::query("INSERT INTO asset_usages(id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,?,?)")
+                .bind(Uuid::new_v4().to_string()).bind(&session.id).bind(&id).bind(&version_id)
                 .bind(&session.title).bind(if content_origin == "upload" { "uploaded" } else { "created" }).bind(&now).execute(&mut *transaction).await?;
         }
-        let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(account_id,request_id,operation,request_digest,asset_id) VALUES(?,?,'create',?,?) ON CONFLICT(account_id,request_id) DO NOTHING RETURNING asset_id")
-            .bind(account).bind(request_id).bind(&fingerprint).bind(&id).fetch_optional(&mut *transaction).await?;
+        let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(request_id,operation,request_digest,asset_id) VALUES(?,'create',?,?) ON CONFLICT(request_id) DO NOTHING RETURNING asset_id")
+            .bind(request_id).bind(&fingerprint).bind(&id).fetch_optional(&mut *transaction).await?;
         if recorded.is_none() {
             transaction.rollback().await?;
             return self
-                .completed_asset_operation(account, request_id, "create", &fingerprint)
+                .completed_asset_operation(request_id, "create", &fingerprint)
                 .await?
+                .map(|asset| (asset, true))
                 .ok_or(Error::State("重复资产请求缺少保存结果"));
         }
-        sqlx::query("INSERT INTO project_assets(id,account_id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at) VALUES(?,?,?,?,?,?,?,?)")
-            .bind(Uuid::new_v4().to_string()).bind(account).bind(project_id).bind(&id).bind(&version_id).bind(name).bind(&now).bind(&now).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO project_assets(id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at) VALUES(?,?,?,?,?,?,?)")
+            .bind(Uuid::new_v4().to_string()).bind(target_project).bind(&id).bind(&version_id).bind(name).bind(&now).bind(&now).execute(&mut *transaction).await?;
         transaction.commit().await?;
-        self.get_asset(account, &id).await
+        Ok((self.get_asset(&id).await?, false))
     }
 
-    pub async fn get_asset(&self, account: &str, id: &str) -> Result<Asset> {
-        Self::check_account(account)?;
-        let row = sqlx::query("SELECT id,name,kind,origin,current_version,created_at,updated_at FROM assets WHERE account_id=? AND id=?")
-            .bind(account).bind(id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
-        let rows = sqlx::query("SELECT v.*,b.path FROM asset_versions v JOIN blobs b ON b.account_id=v.account_id AND b.digest=v.digest WHERE v.account_id=? AND v.asset_id=? ORDER BY v.version")
-            .bind(account).bind(id).fetch_all(&self.pool).await?;
-        let versions = rows
+    pub async fn get_asset(&self, id: &str) -> Result<Asset> {
+        let row = sqlx::query("SELECT id,name,kind,origin,current_version,created_at,updated_at FROM assets WHERE id=?")
+            .bind(id).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
+        let rows = sqlx::query("SELECT v.*,b.path FROM asset_versions v JOIN blobs b ON b.digest=v.digest WHERE v.asset_id=? ORDER BY v.version")
+            .bind(id).fetch_all(&self.pool).await?;
+        let mut versions = rows
             .iter()
             .map(|row| -> Result<AssetVersion> {
                 let metadata: Value = serde_json::from_str(row.get("metadata"))?;
@@ -467,9 +572,19 @@ impl Store {
                 })
             })
             .collect::<Result<Vec<_>>>()?;
-        let usages = sqlx::query("SELECT u.id,u.session_id,u.session_title_snapshot,u.usage_kind,u.run_id,u.created_at,EXISTS(SELECT 1 FROM sessions s WHERE s.account_id=u.account_id AND s.id=u.session_id) AS session_available FROM asset_usages u WHERE u.account_id=? AND u.asset_id=? ORDER BY u.created_at,u.id")
-            .bind(account).bind(id).fetch_all(&self.pool).await?.iter().map(|row| serde_json::json!({
+        if row.get::<String, _>("kind") == "audio" {
+            for version in &mut versions {
+                if version.metadata.get("duration").is_some() { continue; }
+                let info = self.probe_audio_metadata(&self.read_asset(id, &version.id).await?).await?;
+                sqlx::query("UPDATE asset_versions SET metadata=json_set(metadata,'$.duration',json(?)) WHERE asset_id=? AND id=?")
+                    .bind(info["duration"].to_string()).bind(id).bind(&version.id).execute(&self.pool).await?;
+                version.metadata["duration"] = info["duration"].clone();
+            }
+        }
+        let usages = sqlx::query("SELECT u.id,u.session_id,u.asset_version_id,u.session_title_snapshot,u.usage_kind,u.run_id,u.created_at,EXISTS(SELECT 1 FROM sessions s WHERE s.id=u.session_id) AS session_available FROM asset_usages u WHERE u.asset_id=? ORDER BY u.created_at,u.id")
+            .bind(id).fetch_all(&self.pool).await?.iter().map(|row| serde_json::json!({
                 "id": row.get::<String, _>("id"), "session_id": row.get::<String, _>("session_id"),
+                "asset_version_id": row.get::<String, _>("asset_version_id"),
                 "session_title_snapshot": row.get::<String, _>("session_title_snapshot"), "usage_kind": row.get::<String, _>("usage_kind"),
                 "run_id": row.get::<Option<String>, _>("run_id"), "created_at": row.get::<String, _>("created_at"), "session_available": row.get::<bool, _>("session_available"),
             })).collect();
@@ -486,77 +601,65 @@ impl Store {
         })
     }
 
-    pub async fn asset_path(
-        &self,
-        account: &str,
-        asset_id: &str,
-        version_id: &str,
-    ) -> Result<PathBuf> {
-        Self::check_account(account)?;
-        let path: Option<String> = sqlx::query_scalar("SELECT b.path FROM asset_versions v JOIN blobs b ON b.account_id=v.account_id AND b.digest=v.digest WHERE v.account_id=? AND v.asset_id=? AND v.id=?")
-            .bind(account).bind(asset_id).bind(version_id).fetch_optional(&self.pool).await?;
+    pub async fn asset_path(&self, asset_id: &str, version_id: &str) -> Result<PathBuf> {
+        let path: Option<String> = sqlx::query_scalar("SELECT b.path FROM asset_versions v JOIN blobs b ON b.digest=v.digest WHERE v.asset_id=? AND v.id=?")
+            .bind(asset_id).bind(version_id).fetch_optional(&self.pool).await?;
         let path = PathBuf::from(path.ok_or(Error::NotFound)?).canonicalize()?;
-        let root = self
-            .root
-            .join("assets")
-            .join(digest(account.as_bytes()))
-            .canonicalize()?;
+        let root = self.root.join("assets").canonicalize()?;
         if !path.starts_with(root) {
             return Err(Error::Invalid("文件路径超出授权范围"));
         }
         Ok(path)
     }
 
-    pub async fn read_asset(
-        &self,
-        account: &str,
-        asset_id: &str,
-        version_id: &str,
-    ) -> Result<Vec<u8>> {
-        Ok(std::fs::read(
-            self.asset_path(account, asset_id, version_id).await?,
-        )?)
+    pub async fn read_asset(&self, asset_id: &str, version_id: &str) -> Result<Vec<u8>> {
+        Ok(std::fs::read(self.asset_path(asset_id, version_id).await?)?)
     }
 
     pub async fn update_text_asset(
         &self,
-        account: &str,
         id: &str,
         content: &str,
         request_id: &str,
     ) -> Result<Asset> {
-        self.update_text_asset_details(account, id, content, request_id, None)
+        self.update_text_asset_details(id, content, request_id, None, None)
             .await
     }
 
     pub(crate) async fn update_text_asset_in_session(
         &self,
-        account: &str,
         session: &str,
         id: &str,
         content: &str,
         request_id: &str,
     ) -> Result<Asset> {
-        self.update_text_asset_details(account, id, content, request_id, Some(session))
+        self.update_text_asset_details(id, content, request_id, Some(session), None)
             .await
+    }
+
+    pub(crate) async fn update_text_asset_expected(&self, session: &str, id: &str, content: &str, request_id: &str, expected: i64) -> Result<Asset> {
+        self.update_text_asset_details(id, content, request_id, Some(session), Some(expected)).await
     }
 
     async fn update_text_asset_details(
         &self,
-        account: &str,
         id: &str,
         content: &str,
         request_id: &str,
         session: Option<&str>,
+        expected_version: Option<i64>,
     ) -> Result<Asset> {
         required(request_id, "请求标识不能为空")?;
         required(content, "文档内容不能为空")?;
         if content.len() > MAX_MANUAL_TEXT_BYTES {
             return Err(Error::Invalid("文档内容超过 1 MiB"));
         }
-        let asset = self.get_asset(account, id).await?;
+        let asset = self.get_asset(id).await?;
+        if expected_version.is_some_and(|expected| expected != asset.current_version) {
+            return Err(Error::Conflict("视频项目已更新，重新读取后编辑".to_owned()));
+        }
         let session = match session {
-            Some(id) => Some(self.get_session(account, id).await?),
+            Some(id) => Some(self.get_session(id).await?),
             None => None,
         };
         if asset.kind != "document"
@@ -573,7 +676,7 @@ impl Store {
             None => digest(&serde_json::to_vec(&(id, &hash))?),
         };
         if let Some(previous) = self
-            .completed_asset_operation(account, request_id, "update", &fingerprint)
+            .completed_asset_operation(request_id, "update", &fingerprint)
             .await?
         {
             return Ok(previous);
@@ -584,56 +687,54 @@ impl Store {
             .ok_or(Error::Invalid("资产版本不存在"))?;
         let now = timestamp()?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        self.save_blob_in(&mut transaction, account, content.as_bytes())
+        self.save_blob_in(&mut transaction, AssetContent::Bytes(content.as_bytes()))
             .await?;
-        let changed = sqlx::query("UPDATE assets SET current_version=current_version+1,updated_at=? WHERE account_id=? AND id=? AND current_version=?")
-            .bind(&now).bind(account).bind(id).bind(asset.current_version).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE assets SET current_version=current_version+1,updated_at=? WHERE id=? AND current_version=?")
+            .bind(&now).bind(id).bind(asset.current_version).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             transaction.rollback().await?;
             return self
-                .completed_asset_operation(account, request_id, "update", &fingerprint)
+                .completed_asset_operation(request_id, "update", &fingerprint)
                 .await?
                 .ok_or(Error::Invalid("资产已更新，重新读取后编辑"));
         }
         let version_id = Uuid::new_v4().to_string();
-        sqlx::query("INSERT INTO asset_versions(id,account_id,asset_id,version,digest,mime_type,size_bytes,format,content_origin,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)")
-            .bind(&version_id).bind(account).bind(id).bind(asset.current_version + 1).bind(hash)
+        sqlx::query("INSERT INTO asset_versions(id,asset_id,version,digest,mime_type,size_bytes,format,content_origin,created_at) VALUES(?,?,?,?,?,?,?,?,?)")
+            .bind(&version_id).bind(id).bind(asset.current_version + 1).bind(hash)
             .bind(&current.mime_type).bind(content.len() as i64).bind(&current.format).bind("manual").bind(&now).execute(&mut *transaction).await?;
         if let Some(session) = &session {
-            sqlx::query("INSERT INTO asset_usages(id,account_id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,?,'created',?)")
-                .bind(Uuid::new_v4().to_string()).bind(account).bind(&session.id).bind(id).bind(&version_id).bind(&session.title).bind(&now)
+            sqlx::query("INSERT INTO asset_usages(id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,'created',?)")
+                .bind(Uuid::new_v4().to_string()).bind(&session.id).bind(id).bind(&version_id).bind(&session.title).bind(&now)
                 .execute(&mut *transaction).await?;
-            sqlx::query("INSERT INTO project_assets(id,account_id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
-                .bind(Uuid::new_v4().to_string()).bind(account).bind(&session.project_id).bind(id).bind(&version_id).bind(&asset.name).bind(&now).bind(&now)
+            sqlx::query("INSERT INTO project_assets(id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at) VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
+                .bind(Uuid::new_v4().to_string()).bind(&session.project_id).bind(id).bind(&version_id).bind(&asset.name).bind(&now).bind(&now)
                 .execute(&mut *transaction).await?;
         }
-        let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(account_id,request_id,operation,request_digest,asset_id) VALUES(?,?,'update',?,?) ON CONFLICT(account_id,request_id) DO NOTHING RETURNING asset_id")
-            .bind(account).bind(request_id).bind(&fingerprint).bind(id).fetch_optional(&mut *transaction).await?;
+        let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(request_id,operation,request_digest,asset_id) VALUES(?,'update',?,?) ON CONFLICT(request_id) DO NOTHING RETURNING asset_id")
+            .bind(request_id).bind(&fingerprint).bind(id).fetch_optional(&mut *transaction).await?;
         if recorded.is_none() {
             transaction.rollback().await?;
             return self
-                .completed_asset_operation(account, request_id, "update", &fingerprint)
+                .completed_asset_operation(request_id, "update", &fingerprint)
                 .await?
                 .ok_or(Error::State("重复资产请求缺少保存结果"));
         }
         transaction.commit().await?;
-        self.get_asset(account, id).await
+        self.get_asset(id).await
     }
 
     pub async fn reference_asset(
         &self,
-        account: &str,
         session_id: &str,
         asset_id: &str,
         version_id: &str,
         request_id: &str,
     ) -> Result<Asset> {
-        self.reference_asset_input(account, session_id, serde_json::json!({ "asset_id": asset_id, "asset_version_id": version_id, "request_id": request_id })).await
+        self.reference_asset_input(session_id, serde_json::json!({ "asset_id": asset_id, "asset_version_id": version_id, "request_id": request_id })).await
     }
 
     pub(crate) async fn reference_asset_input(
         &self,
-        account: &str,
         session_id: &str,
         document: Value,
     ) -> Result<Asset> {
@@ -648,10 +749,10 @@ impl Store {
         let input: ReferenceInput =
             serde_json::from_value(document).map_err(|_| Error::Invalid("资产引用字段无效"))?;
         required(&input.request_id, "请求标识不能为空")?;
-        let session = self.get_session(account, session_id).await?;
-        self.asset_path(account, &input.asset_id, &input.asset_version_id)
+        let session = self.get_session(session_id).await?;
+        self.asset_path(&input.asset_id, &input.asset_version_id)
             .await?;
-        let asset = self.get_asset(account, &input.asset_id).await?;
+        let asset = self.get_asset(&input.asset_id).await?;
         let fingerprint = digest(&serde_json::to_vec(&(
             session_id,
             &input.asset_id,
@@ -659,14 +760,14 @@ impl Store {
             &input.source_project_asset_id,
         ))?);
         if let Some(previous) = self
-            .completed_asset_operation(account, &input.request_id, "reference", &fingerprint)
+            .completed_asset_operation(&input.request_id, "reference", &fingerprint)
             .await?
         {
             return Ok(previous);
         }
         let copy_source = match input.source_project_asset_id {
             Some(id) => {
-                let source = self.project_asset(account, &id).await?;
+                let source = self.project_asset(&id).await?;
                 if source["asset_id"] != input.asset_id {
                     return Err(Error::NotFound);
                 }
@@ -677,7 +778,7 @@ impl Store {
                     let name = if project.is_empty() {
                         String::new()
                     } else {
-                        self.get_project(account, project).await?.name
+                        self.get_project(project).await?.name
                     };
                     Some(serde_json::json!({ "project_id": project, "project_asset_id": id, "project_name_snapshot": name, "display_name": source["display_name"], "deleted": false }).to_string())
                 }
@@ -686,32 +787,36 @@ impl Store {
         };
         let now = timestamp()?;
         let mut transaction = self.pool.begin().await?;
-        let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(account_id,request_id,operation,request_digest,asset_id) VALUES(?,?,'reference',?,?) ON CONFLICT(account_id,request_id) DO NOTHING RETURNING asset_id")
-            .bind(account).bind(&input.request_id).bind(&fingerprint).bind(&input.asset_id).fetch_optional(&mut *transaction).await?;
+        let recorded: Option<String> = sqlx::query_scalar("INSERT INTO asset_operations(request_id,operation,request_digest,asset_id) VALUES(?,'reference',?,?) ON CONFLICT(request_id) DO NOTHING RETURNING asset_id")
+            .bind(&input.request_id).bind(&fingerprint).bind(&input.asset_id).fetch_optional(&mut *transaction).await?;
         if recorded.is_none() {
             transaction.rollback().await?;
             return self
-                .completed_asset_operation(account, &input.request_id, "reference", &fingerprint)
+                .completed_asset_operation(&input.request_id, "reference", &fingerprint)
                 .await?
                 .ok_or(Error::State("重复资产请求缺少保存结果"));
         }
-        sqlx::query("INSERT INTO project_assets(id,account_id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at,copy_source) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
-            .bind(Uuid::new_v4().to_string()).bind(account).bind(session.project_id).bind(&input.asset_id).bind(&input.asset_version_id)
+        sqlx::query("INSERT INTO project_assets(id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at,copy_source) VALUES(?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING")
+            .bind(Uuid::new_v4().to_string()).bind(session.project_id).bind(&input.asset_id).bind(&input.asset_version_id)
             .bind(asset.name).bind(&now).bind(&now).bind(copy_source).execute(&mut *transaction).await?;
-        sqlx::query("INSERT INTO asset_usages(id,account_id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,?,'referenced',?) ON CONFLICT(session_id,asset_id,asset_version_id,usage_kind) DO NOTHING")
-            .bind(Uuid::new_v4().to_string()).bind(account).bind(session_id).bind(&input.asset_id).bind(&input.asset_version_id)
+        sqlx::query("INSERT INTO asset_usages(id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,created_at) VALUES(?,?,?,?,?,'referenced',?) ON CONFLICT(session_id,asset_id,asset_version_id,usage_kind) DO NOTHING")
+            .bind(Uuid::new_v4().to_string()).bind(session_id).bind(&input.asset_id).bind(&input.asset_version_id)
             .bind(session.title).bind(&now).execute(&mut *transaction).await?;
         transaction.commit().await?;
-        self.get_asset(account, &input.asset_id).await
+        self.get_asset(&input.asset_id).await
     }
 
-    pub async fn list_session_assets(&self, account: &str, session_id: &str) -> Result<Vec<Asset>> {
-        self.get_session(account, session_id).await?;
-        let ids: Vec<String> = sqlx::query_scalar("SELECT DISTINCT asset_id FROM asset_usages WHERE account_id=? AND session_id=? ORDER BY asset_id")
-            .bind(account).bind(session_id).fetch_all(&self.pool).await?;
+    pub async fn list_session_assets(&self, session_id: &str) -> Result<Vec<Asset>> {
+        self.get_session(session_id).await?;
+        let ids: Vec<String> = sqlx::query_scalar(
+            "SELECT DISTINCT asset_id FROM asset_usages WHERE session_id=? ORDER BY asset_id",
+        )
+        .bind(session_id)
+        .fetch_all(&self.pool)
+        .await?;
         let mut assets = Vec::with_capacity(ids.len());
         for id in ids {
-            assets.push(self.get_asset(account, &id).await?);
+            assets.push(self.get_asset(&id).await?);
         }
         Ok(assets)
     }

@@ -272,20 +272,19 @@ pub(crate) fn elapsed_ms(start: &str, end: &str) -> Result<u64> {
 impl Store {
     pub(crate) async fn begin_model_request(
         &self,
-        account: &str,
         run_id: &str,
         turn: usize,
         model: &ModelInput,
         request: &CompletionRequest,
         purpose: &str,
     ) -> Result<String> {
-        self.check_run_model_enabled(account, run_id).await?;
-        let run = self.get_run(account, run_id).await?;
+        self.check_run_model_enabled(run_id).await?;
+        let run = self.get_run(run_id).await?;
         let id = Uuid::new_v4().to_string();
         let parts = request_parts(request, &model.model)?;
         let projected = projected_tokens(request, &model.model)?;
-        let turn_number: i64 = sqlx::query_scalar("SELECT count(*) FROM runs WHERE account_id=? AND session_id=? AND (created_at<? OR (created_at=? AND id<=?))")
-            .bind(account).bind(text(&run, "session_id")?).bind(text(&run, "created_at")?).bind(text(&run, "created_at")?).bind(run_id).fetch_one(&self.pool).await?;
+        let turn_number: i64 = sqlx::query_scalar("SELECT count(*) FROM runs WHERE session_id=? AND (created_at<? OR (created_at=? AND id<=?))")
+            .bind(text(&run, "session_id")?).bind(text(&run, "created_at")?).bind(text(&run, "created_at")?).bind(run_id).fetch_one(&self.pool).await?;
         let preview = request
             .chat_history
             .last()
@@ -302,21 +301,20 @@ impl Store {
             "cache_read_tokens": null, "cache_write_tokens": null, "reasoning_tokens": null,
             "projected_tokens": projected, "token_estimator": "cl100k_base+image_budget_v1", "parts": parts, "content_available": true,
         });
-        sqlx::query("INSERT INTO model_requests(id,account_id,session_id,run_id,created_at,document,request) VALUES(?,?,?,?,?,?,?)")
-            .bind(&id).bind(account).bind(text(&run, "session_id")?).bind(run_id).bind(&now).bind(document.to_string())
+        sqlx::query("INSERT INTO model_requests(id,session_id,run_id,created_at,document,request) VALUES(?,?,?,?,?,?)")
+            .bind(&id).bind(text(&run, "session_id")?).bind(run_id).bind(&now).bind(document.to_string())
             .bind(serde_json::to_string(request)?).execute(&self.pool).await?;
         Ok(id)
     }
 
-    pub(crate) async fn mark_model_first_token(&self, account: &str, id: &str) -> Result<()> {
-        sqlx::query("UPDATE model_requests SET document=json_set(document,'$.first_token_at',?) WHERE account_id=? AND id=? AND json_extract(document,'$.status')='running' AND json_extract(document,'$.first_token_at') IS NULL")
-            .bind(timestamp()?).bind(account).bind(id).execute(&self.pool).await?;
+    pub(crate) async fn mark_model_first_token(&self, id: &str) -> Result<()> {
+        sqlx::query("UPDATE model_requests SET document=json_set(document,'$.first_token_at',?) WHERE id=? AND json_extract(document,'$.status')='running' AND json_extract(document,'$.first_token_at') IS NULL")
+            .bind(timestamp()?).bind(id).execute(&self.pool).await?;
         Ok(())
     }
 
     pub(crate) async fn finish_model_request(
         &self,
-        account: &str,
         id: &str,
         response: &CompletionResponse,
     ) -> Result<()> {
@@ -333,37 +331,35 @@ impl Store {
             "succeeded"
         };
         let output = json!({ "choice": response.choice, "usage": usage, "finish_reason": response.finish_reason() });
-        sqlx::query("UPDATE model_requests SET document=json_set(document,'$.status',?,'$.ended_at',?,'$.input_tokens',?,'$.output_tokens',?,'$.cache_read_tokens',?,'$.cache_write_tokens',?,'$.reasoning_tokens',?),response=? WHERE account_id=? AND id=? AND json_extract(document,'$.status')='running'")
+        sqlx::query("UPDATE model_requests SET document=json_set(document,'$.status',?,'$.ended_at',?,'$.input_tokens',?,'$.output_tokens',?,'$.cache_read_tokens',?,'$.cache_write_tokens',?,'$.reasoning_tokens',?),response=? WHERE id=? AND json_extract(document,'$.status')='running'")
             .bind(status).bind(now).bind(usage.input_tokens.map(|tokens| tokens as i64)).bind(usage.output_tokens.map(|tokens| tokens as i64))
             .bind(usage.cached_input_tokens.map(|tokens| tokens as i64)).bind(usage.cache_creation_input_tokens.map(|tokens| tokens as i64))
-            .bind(usage.reasoning_tokens.map(|tokens| tokens as i64)).bind(output.to_string()).bind(account).bind(id).execute(&self.pool).await?;
+            .bind(usage.reasoning_tokens.map(|tokens| tokens as i64)).bind(output.to_string()).bind(id).execute(&self.pool).await?;
         Ok(())
     }
 
     pub(crate) async fn context_request(
         &self,
-        account: &str,
         session: &str,
         id: Option<&str>,
     ) -> Result<Value> {
-        self.get_session(account, session).await?;
-        let document: Option<String> = sqlx::query_scalar("SELECT document FROM model_requests WHERE account_id=? AND session_id=? AND (? IS NULL OR id=?) ORDER BY created_at DESC,id DESC LIMIT 1")
-            .bind(account).bind(session).bind(id).bind(id).fetch_optional(&self.pool).await?;
+        self.get_session(session).await?;
+        let document: Option<String> = sqlx::query_scalar("SELECT document FROM model_requests WHERE session_id=? AND (? IS NULL OR id=?) ORDER BY created_at DESC,id DESC LIMIT 1")
+            .bind(session).bind(id).bind(id).fetch_optional(&self.pool).await?;
         Ok(serde_json::from_str(&document.ok_or(Error::NotFound)?)?)
     }
 
     pub(crate) async fn context_requests(
         &self,
-        account: &str,
         session: &str,
         offset: i64,
     ) -> Result<Value> {
-        self.get_session(account, session).await?;
+        self.get_session(session).await?;
         if offset < 0 {
             return Err(Error::Invalid("分页参数无效"));
         }
-        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM model_requests WHERE account_id=? AND session_id=? ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?")
-            .bind(account).bind(session).bind(offset).fetch_all(&self.pool).await?;
+        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM model_requests WHERE session_id=? ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?")
+            .bind(session).bind(offset).fetch_all(&self.pool).await?;
         let requests: Vec<Value> = rows
             .iter()
             .take(50)
@@ -376,17 +372,16 @@ impl Store {
 
     pub(crate) async fn context_events(
         &self,
-        account: &str,
         session: &str,
         offset: i64,
         kind: &str,
     ) -> Result<Value> {
-        self.get_session(account, session).await?;
+        self.get_session(session).await?;
         if offset < 0 {
             return Err(Error::Invalid("分页参数无效"));
         }
-        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM context_events WHERE account_id=? AND session_id=? AND (?='' OR json_extract(document,'$.kind')=?) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?")
-            .bind(account).bind(session).bind(kind).bind(kind).bind(offset).fetch_all(&self.pool).await?;
+        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM context_events WHERE session_id=? AND (?='' OR json_extract(document,'$.kind')=?) ORDER BY created_at DESC,id DESC LIMIT 51 OFFSET ?")
+            .bind(session).bind(kind).bind(kind).bind(offset).fetch_all(&self.pool).await?;
         let events: Vec<Value> = rows
             .iter()
             .take(50)
@@ -397,10 +392,10 @@ impl Store {
         )
     }
 
-    pub(crate) async fn context_overview(&self, account: &str, session: &str) -> Result<Value> {
-        self.get_session(account, session).await?;
-        let rows = sqlx::query("SELECT run_id,document FROM model_requests WHERE account_id=? AND session_id=? ORDER BY created_at,id")
-            .bind(account).bind(session).fetch_all(&self.pool).await?;
+    pub(crate) async fn context_overview(&self, session: &str) -> Result<Value> {
+        self.get_session(session).await?;
+        let rows = sqlx::query("SELECT run_id,document FROM model_requests WHERE session_id=? ORDER BY created_at,id")
+            .bind(session).fetch_all(&self.pool).await?;
         let mut turns = std::collections::HashSet::new();
         let mut tokens = json!({ "input": 0, "output": 0, "cache_read": 0, "cache_write": 0, "uncached": 0, "unclassified_input": 0, "reasoning": 0, "missing_requests": 0, "cache_known_requests": 0, "cache_known_input": 0 });
         let mut model_wait = 0;
@@ -478,8 +473,8 @@ impl Store {
             }
             current = document;
         }
-        let tools = sqlx::query("SELECT t.started_at,t.ended_at FROM tool_calls t JOIN runs r ON r.id=t.run_id WHERE t.account_id=? AND r.session_id=?")
-            .bind(account).bind(session).fetch_all(&self.pool).await?;
+        let tools = sqlx::query("SELECT t.started_at,t.ended_at FROM tool_calls t JOIN runs r ON r.id=t.run_id WHERE r.session_id=?")
+            .bind(session).fetch_all(&self.pool).await?;
         let mut tools_ms = 0;
         for tool in &tools {
             if let Some(start) = tool.get::<Option<String>, _>("started_at") {
@@ -491,8 +486,8 @@ impl Store {
                 )?;
             }
         }
-        let event_counts = sqlx::query("SELECT json_extract(document,'$.kind') AS kind,count(*) AS amount FROM context_events WHERE account_id=? AND session_id=? GROUP BY kind")
-            .bind(account).bind(session).fetch_all(&self.pool).await?;
+        let event_counts = sqlx::query("SELECT json_extract(document,'$.kind') AS kind,count(*) AS amount FROM context_events WHERE session_id=? GROUP BY kind")
+            .bind(session).fetch_all(&self.pool).await?;
         let counts: std::collections::HashMap<String, i64> = event_counts
             .into_iter()
             .map(|row| (row.get("kind"), row.get("amount")))
@@ -587,21 +582,17 @@ mod tests {
             .prefix("request-model-state-")
             .tempdir_in(root)?;
         let store = Store::open(&directory.path().join("studio.sqlite")).await?;
-        let account = "request-model-state";
         let mut configuration = json!({
             "name": "请求启停检查", "protocol": "openai_chat_compatible", "base_url": "http://127.0.0.1:1/v1", "model": "local-model",
             "enabled": true, "agent_enabled": true, "default": false,
             "limits": { "context_window_tokens": 32000, "max_input_tokens": 24000, "max_output_tokens": 4000 },
             "thinking": { "enabled": false }, "capabilities": { "tools": true, "vision": false, "image_output": false, "streaming": true }
         });
-        let model = store
-            .save_model(account, None, configuration.clone())
-            .await?;
+        let model = store.save_model(None, configuration.clone()).await?;
         let model_id = text(&model, "id")?;
-        let session = store.create_session(account, "request").await?;
+        let session = store.create_session("request").await?;
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "request",
                 model_id,
@@ -610,29 +601,28 @@ mod tests {
             )
             .await?;
         let run_id = text(&queued["run"], "id")?;
-        assert!(store.claim_run(account, run_id).await?);
-        let saved = store.run_model(account, run_id).await?;
+        assert!(store.claim_run(run_id).await?);
+        let saved = store.run_model(run_id).await?;
         let request = CompletionRequest::new("检查启停");
         for field in ["enabled", "agent_enabled"] {
             configuration[field] = json!(false);
             store
-                .save_model(account, Some(model_id), configuration.clone())
+                .save_model(Some(model_id), configuration.clone())
                 .await?;
             for purpose in ["agent", "compaction"] {
                 let error = store
-                    .begin_model_request(account, run_id, 0, &saved, &request, purpose)
+                    .begin_model_request(run_id, 0, &saved, &request, purpose)
                     .await
                     .expect_err("停用模型不能建立新的请求");
                 assert!(matches!(error, Error::Invalid("模型尚未启用 Agent 调用")));
             }
             configuration[field] = json!(true);
             store
-                .save_model(account, Some(model_id), configuration.clone())
+                .save_model(Some(model_id), configuration.clone())
                 .await?;
         }
         let count: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM model_requests WHERE account_id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT count(*) FROM model_requests")
                 .fetch_one(&store.pool)
                 .await?;
         assert_eq!(count, 0);

@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
+import { useEffect, useMemo, useRef, useState, type FormEvent, type KeyboardEvent } from 'react'
 import { useInfiniteQuery, useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useVirtualizer } from '@tanstack/react-virtual'
 import {
@@ -6,6 +6,7 @@ import {
   ChevronDown,
   ChevronRight,
   Download,
+  Ellipsis,
   Folder,
   FolderOpen,
   Grid2X2,
@@ -13,15 +14,20 @@ import {
   List,
   MessageCircle,
   Pencil,
+  Plus,
   Search,
   Settings2,
   SlidersHorizontal,
   Star,
+  SquareCheck,
   Tag,
   Upload,
   X,
 } from 'lucide-react'
 import { baseURL } from '@/lib/api/client'
+import type { StudioVideoWork, VideoReferenceLocation } from '@/lib/api/video-projects'
+import { VideoWorkPicker } from './video-work-picker'
+import { VideoAssetUsages } from './video-asset-usages'
 import {
   addStudioAssetToProject,
   createStudioAssetTag,
@@ -108,6 +114,7 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tooltip, TooltipContent, TooltipTrigger } from '@/components/ui/tooltip'
 import { AssetCard, AssetDetailsDialog, AssetDetailsInfo, AssetInfoRow, AssetKindIcon, AssetPaletteRow, AssetSizeRow } from './studio-assets'
+import { StudioProjectDialog } from './studio-project-dialog'
 
 const treeWidthStorageKey = 'studio.library.treeWidth'
 const treeMinWidth = 200
@@ -185,11 +192,13 @@ export { formatSize } from './studio-asset-format'
 
 export function StudioLibrary({
   onOpenSession,
+  onOpenVideoWork,
   initialProjectId,
   initialSessionId,
   initialSessionTitle,
 }: {
   onOpenSession: (sessionId: string, sourceRunId?: string) => void
+  onOpenVideoWork: (work: StudioVideoWork, location?: VideoReferenceLocation) => Promise<void>
   initialProjectId?: string
   initialSessionId?: string
   initialSessionTitle?: string
@@ -204,6 +213,9 @@ export function StudioLibrary({
     queryFn: getStudioLibraryPreferences,
   })
   const [projectId, setProjectId] = useState<string>()
+  const [projectOpen, setProjectOpen] = useState(initialProjectId !== undefined || Boolean(initialSessionId))
+  const [projectDialogOpen, setProjectDialogOpen] = useState(false)
+  const [selecting, setSelecting] = useState(false)
   const [treeMode, setTreeMode] = useState<StudioLibraryTreeMode>('asset')
   const [treeFocusId, setTreeFocusId] = useState<string>()
   const [sessionFilterId, setSessionFilterId] = useState(initialSessionId)
@@ -226,6 +238,21 @@ export function StudioLibrary({
   const [filterError, setFilterError] = useState('')
   const [selectedIds, setSelectedIds] = useState<string[]>([])
   const [selectedAssetId, setSelectedAssetId] = useState<string>()
+  const assetTriggerRef = useRef<HTMLElement | null>(null)
+  const openAsset = (id: string, trigger?: HTMLElement) => {
+    assetTriggerRef.current = trigger ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null)
+    setSelectedAssetId(id)
+  }
+  const activeAsset = useQuery({
+    queryKey: ['studio', 'library', 'asset', selectedAssetId],
+    queryFn: () => getStudioProjectAsset(selectedAssetId!),
+    enabled: Boolean(selectedAssetId),
+  })
+  useEffect(() => {
+    if (!activeAsset.data) return
+    setProjectId(activeAsset.data.project_id)
+    setProjectOpen(true)
+  }, [activeAsset.data])
   const [categoryDialog, setCategoryDialog] = useState<'create' | 'rename'>()
   const [categoryName, setCategoryName] = useState('')
   const [categoryParentId, setCategoryParentId] = useState('')
@@ -292,17 +319,17 @@ export function StudioLibrary({
     observer.observe(viewport)
     updateColumns()
     return () => observer.disconnect()
-  }, [projectId, treeDocked])
+  }, [projectId, projectOpen, treeDocked])
 
   const categories = useQuery({
     queryKey: ['studio', 'library', 'categories', projectId],
     queryFn: () => listStudioLibraryCategories(projectId!),
-    enabled: projectId !== undefined,
+    enabled: projectOpen && projectId !== undefined,
   })
   const formats = useQuery({
     queryKey: ['studio', 'library', 'formats', projectId],
     queryFn: () => listStudioLibraryFormats(projectId!),
-    enabled: projectId !== undefined,
+    enabled: projectOpen && projectId !== undefined,
   })
   const tags = useQuery({
     queryKey: ['studio', 'library', 'tags'],
@@ -339,7 +366,7 @@ export function StudioLibrary({
         cursor: pageParam,
         limit: 50,
       }),
-    enabled: projectId !== undefined,
+    enabled: projectOpen && projectId !== undefined,
     initialPageParam: '',
     getNextPageParam: (page) => page.next_cursor || undefined,
   })
@@ -348,7 +375,7 @@ export function StudioLibrary({
       uploadStudioAsset(file, undefined, projectId!, requestId),
     onSuccess: (result) => {
       clearFilters()
-      setSelectedAssetId(result.project_asset_id)
+      openAsset(result.project_asset_id)
       void queryClient.invalidateQueries({ queryKey: ['studio', 'library'] })
     },
   })
@@ -425,14 +452,37 @@ export function StudioLibrary({
   }, [projectId, categoryId, kind, format, search, sort, view, appliedFilters])
 
   const selectedCategory = categories.data?.find((item) => item.id === categoryId)
+  const activeGroupIds = useMemo(() => {
+    const item = activeAsset.data
+    if (!item) return []
+    const ids = [
+      `format:${item.version.format ?? ''}`, `rating:${item.rating}`,
+      ...(item.tags.length ? item.tags.map(tag => `tag:${tag.id}`) : ['tag:untagged']),
+      ...(item.usages.length ? item.usages.map(usage => `session:${usage.session_id}`) : ['session:none']),
+    ]
+    if (!item.category_id) ids.push('category:uncategorized')
+    else {
+      ids.push(`category-direct:${item.category_id}`)
+      let id: string | undefined = item.category_id
+      while (id) {
+        if (ids.includes(`category:${id}`)) throw new Error('分类层级存在循环')
+        ids.push(`category:${id}`)
+        id = categories.data?.find(category => category.id === id)?.parent_id ?? undefined
+      }
+    }
+    return ids
+  }, [activeAsset.data, categories.data])
   const hasFilters = Boolean(search || categoryId !== 'all' || kind !== 'all' || format !== 'all' || sessionFilterId || advancedFilterCount || showArchived)
   const setProject = (id: string) => {
     const changed = id !== projectId
+    setProjectOpen(true)
+    setSelecting(false)
     setProjectId(id)
     setSessionFilterId(undefined)
-    if (changed) {
+    if (changed || !projectOpen) {
       setTreeFocusId(`project:${id}`)
       setCategoryId('all')
+      setKind('all')
       setFormat('all')
       setQuery('')
       setSearch('')
@@ -484,7 +534,9 @@ export function StudioLibrary({
           key={project.id || 'unassigned'}
           project={project}
           mode={treeMode}
-          selectedProjectId={projectId}
+          selectedProjectId={projectOpen ? projectId : undefined}
+          selectedAssetId={activeAsset.data?.project_id === project.id ? selectedAssetId : undefined}
+          activeGroupIds={activeGroupIds}
           treeFocusId={treeFocusId}
           onFocusTreeItem={setTreeFocusId}
           isFirstProject={project.id === projects.data?.[0]?.id}
@@ -492,7 +544,7 @@ export function StudioLibrary({
           onAsset={(id, node) => {
             setProject(id)
             if (!node.asset_id) throw new Error('资产节点缺少 asset_id')
-            setSelectedAssetId(node.asset_id)
+            openAsset(node.asset_id)
             setTreeFocusId(`node:${id}:${node.id}`)
             setTreeOpen(false)
           }}
@@ -521,12 +573,11 @@ export function StudioLibrary({
   )
 
   return (
-    <main id='main-content' className='min-h-0 min-w-0 flex-1 py-3 pr-3 sm:py-4 sm:pr-4' onClick={(event) => {
+    <section className='flex min-h-0 min-w-0 flex-1 flex-col' onClick={(event) => {
       if (event.target instanceof Element && !event.target.closest('[data-slot="studio-asset-card"], button, a, input, label, [role="dialog"], [role="menu"], [role="listbox"], [role="separator"], [data-slot="scroll-area-scrollbar"]')) {
         setSelectedIds([])
       }
     }}>
-      <section className='flex h-full min-h-0 flex-col overflow-hidden rounded-2xl border bg-card'>
           <input ref={fileInputRef} type='file' aria-label='选择上传资产' className='sr-only' onChange={(event) => {
             const file = event.target.files?.[0]
             if (file && projectId !== undefined) upload.mutate({ file, requestId: crypto.randomUUID() })
@@ -544,9 +595,9 @@ export function StudioLibrary({
               onResize={({ inPixels }) => window.localStorage.setItem(treeWidthStorageKey, String(Math.round(inPixels)))}
             >
               <aside className='flex h-full min-w-0 flex-col bg-muted/20'>
-                <div className='flex h-14 shrink-0 items-center justify-between border-b px-4'>
-                  <h1 className='text-sm font-semibold'>资产库</h1>{treeSettings}
-                </div>
+                <header data-tauri-drag-region='deep' className='studio-page-header studio-continuous-header justify-between'>
+                  <Button variant='ghost' size='sm' aria-label='查看项目文件夹' onClick={() => { setProjectOpen(false); setSelectedAssetId(undefined); setSelectedIds([]); setSelecting(false); setQuery(''); setSearch('') }}><Folder />项目</Button>{treeSettings}
+                </header>
                 <div className='studio-scrollbar min-h-0 w-full min-w-0 flex-1 overflow-x-hidden overflow-y-auto'>{projectTree}</div>
               </aside>
             </ResizablePanel>
@@ -554,9 +605,31 @@ export function StudioLibrary({
           </> : null}
           <ResizablePanel id='library-content' minSize={treeDocked ? 400 : 0} className='min-w-0'>
           <div className='relative flex h-full min-w-0 flex-col'>
-            <div data-slot='studio-library-toolbar' className='flex min-h-14 flex-wrap items-center gap-2 border-b px-4 py-2 lg:px-5'>
-              <Button variant='outline' size='sm' className='xl:hidden' aria-label='打开项目资产树' onClick={() => setTreeOpen(true)}><Folder />项目</Button>
-              <div className='relative min-w-44 flex-1 sm:max-w-sm'>
+            {!projectOpen ? <>
+              <header data-slot='studio-library-toolbar' data-tauri-drag-region='deep' className='studio-page-header studio-continuous-header'>
+                <Button variant='ghost' size='icon-sm' className='xl:hidden' aria-label='打开项目资产树' onClick={() => setTreeOpen(true)}><Folder /></Button>
+                <div className='relative min-w-0 flex-1 sm:max-w-sm'>
+                  <Search className='absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground' />
+                  <Input aria-label='搜索项目文件夹' placeholder='搜索项目文件夹' value={query} onChange={event => setQuery(event.target.value)} className='pl-9' />
+                </div>
+                <Button size='sm' className='ml-auto shrink-0' onClick={() => setProjectDialogOpen(true)}><Plus />新建项目</Button>
+              </header>
+              <ScrollArea className='min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:flex! [&_[data-slot=scroll-area-viewport]>div]:min-h-full [&_[data-slot=scroll-area-viewport]>div]:flex-col'>
+                <div className='flex flex-1 flex-col gap-3 px-5 pb-5'>
+                  {projects.isPending ? <div className='grid gap-3 sm:grid-cols-2'>{Array.from({ length: 4 }, (_, index) => <Skeleton key={index} className='h-16' />)}</div> : projects.isError ? <LibraryState title='项目读取失败' onRetry={() => void projects.refetch()} /> : <div className='grid gap-3' style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 15rem), 1fr))' }}>
+                    {projects.data.filter(project => project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())).map(project => <Button key={project.id || 'unassigned'} data-slot='library-project-card' data-project-id={project.id} variant='outline' className='h-16 min-w-0 justify-start gap-3 px-4 text-left' onClick={() => setProject(project.id)}><span className='flex size-9 shrink-0 items-center justify-center rounded-lg bg-muted'><Folder /></span><span className='flex min-w-0 flex-col gap-1'><span className='truncate text-sm font-medium'>{project.name}</span><span className='text-xs font-normal text-muted-foreground tabular-nums'>{project.asset_count} 项资产</span></span></Button>)}
+                  </div>}
+                  {projects.data && !projects.data.some(project => project.name.toLocaleLowerCase().includes(query.trim().toLocaleLowerCase())) ? <LibraryState title='没有匹配的项目' /> : null}
+                </div>
+              </ScrollArea>
+            </> : <>
+            <header inert={Boolean(selectedAssetId)} data-tauri-drag-region='deep' className='studio-page-header studio-continuous-header'>
+              <Button variant='outline' size='sm' className='max-lg:size-8 max-lg:p-0 xl:hidden' aria-label='打开项目资产树' onClick={() => setTreeOpen(true)}><Folder /><span className='hidden lg:inline'>项目</span></Button>
+              <nav data-slot='library-breadcrumb' aria-label='资产位置' className='flex min-w-0 items-center gap-1'><Button variant='ghost' size='sm' onClick={() => { setProjectOpen(false); setSelectedIds([]); setSelecting(false); setQuery(''); setSearch('') }}>资产库</Button><ChevronRight className='size-3.5 shrink-0 text-muted-foreground' /><h1 aria-current='page' className='truncate px-1 text-sm font-medium'>{projects.data?.find(project => project.id === projectId)?.name}</h1></nav>
+              {projectId !== undefined ? <div className='ml-auto shrink-0'><VideoWorkPicker key={projectId} projectId={projectId} onOpen={onOpenVideoWork} /></div> : null}
+            </header>
+            <div inert={Boolean(selectedAssetId)} data-slot='studio-library-toolbar' role='toolbar' aria-label='资产操作' className='flex min-w-0 items-center gap-2 px-4 pb-2 lg:px-5'>
+              <div className='relative min-w-0 flex-1 sm:max-w-sm'>
                 <Search className='absolute top-1/2 left-3 size-4 -translate-y-1/2 text-muted-foreground' />
                 <Input value={query} onChange={(event) => { setQuery(event.target.value); setSelectedIds([]) }} placeholder='搜索名称或标签' aria-label='搜索名称或标签' className='pl-9' />
               </div>
@@ -612,8 +685,9 @@ export function StudioLibrary({
                 <IconButtonTooltip label={view === 'grid' ? '切换列表视图' : '切换网格视图'}><Button variant='ghost' size='icon' aria-label={view === 'grid' ? '切换列表视图' : '切换网格视图'} onClick={() => setView(view === 'grid' ? 'list' : 'grid')}>
                   {view === 'grid' ? <List /> : <Grid2X2 />}
                 </Button></IconButtonTooltip>
+                <Button variant={selecting ? 'secondary' : 'ghost'} size='sm' aria-pressed={selecting} onClick={() => { setSelecting(!selecting); setSelectedIds([]) }}><SquareCheck /><span>{selecting ? '退出选择' : '选择'}</span></Button>
                 <DropdownMenu>
-                  <DropdownMenuTrigger asChild><Button variant='outline' size='sm' className='shrink-0'>分类操作<ChevronDown /></Button></DropdownMenuTrigger>
+                  <DropdownMenuTrigger asChild><Button variant='outline' size='sm' className='shrink-0 max-lg:size-8 max-lg:p-0' aria-label='分类操作'><span className='hidden lg:inline'>分类操作</span><ChevronDown /></Button></DropdownMenuTrigger>
                   <DropdownMenuContent align='end'>
                     <DropdownMenuGroup>
                       <DropdownMenuItem onSelect={() => { setCategoryName(''); setCategoryParentId(selectedCategory?.id ?? ''); setCategoryDialog('create') }}>新建分类</DropdownMenuItem>
@@ -623,18 +697,18 @@ export function StudioLibrary({
                     <DropdownMenuItem disabled={!selectedCategory} onSelect={() => setDeleteCategoryOpen(true)}>删除分类</DropdownMenuItem>
                   </DropdownMenuContent>
                 </DropdownMenu>
-                <Button size='sm' className='shrink-0' disabled={projectId === undefined || upload.isPending} onClick={() => fileInputRef.current?.click()}><Upload />{upload.isPending ? '正在上传…' : '上传资产'}</Button>
+                <Button size='sm' className='shrink-0 max-lg:size-8 max-lg:p-0' aria-label={upload.isPending ? '正在上传资产' : '上传资产'} disabled={projectId === undefined || upload.isPending} onClick={() => fileInputRef.current?.click()}><Upload /><span className='hidden lg:inline'>{upload.isPending ? '正在上传…' : '上传资产'}</span></Button>
               </div>
             </div>
-            <div className='flex min-w-0 items-center gap-2 px-4 py-2 lg:px-5'>
+            <div inert={Boolean(selectedAssetId)} className='flex min-w-0 items-center gap-2 px-4 py-2 lg:px-5'>
               <div className='min-w-0 flex-1 overflow-x-auto overscroll-x-contain [scrollbar-width:none] [&::-webkit-scrollbar]:hidden' role='group' aria-label='按分类筛选'>
                 <div className='flex w-max items-center gap-1'>
                   {[{ value: 'all', label: '全部资产' }, { value: 'uncategorized', label: '未分类' }, ...(categories.data ?? []).map((item) => ({ value: item.id, label: categoryPath(item, categories.data ?? []) }))].map((item) => <Button key={item.value} variant={categoryId === item.value ? 'secondary' : 'ghost'} size='sm' className='max-w-40 shrink-0' aria-pressed={categoryId === item.value} title={item.label} onClick={() => { setCategoryId(item.value); setSelectedIds([]) }}><span className='truncate'>{item.label}</span></Button>)}
                 </div>
               </div>
             </div>
-          {sessionFilterId ? <div className='flex items-center gap-2 border-b px-4 py-2 text-xs lg:px-5'><span className='text-muted-foreground'>来源对话</span><Badge variant='secondary'>{initialSessionTitle ?? sessionFilterId}<button type='button' aria-label='清除来源对话筛选' onClick={() => { setSessionFilterId(undefined); setSelectedIds([]) }}><X className='size-3' /></button></Badge></div> : null}
-          {selectedIds.length > 0 ? <div className='absolute bottom-12 left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-1 rounded-lg border bg-popover p-1 text-popover-foreground shadow-md'>
+          {sessionFilterId ? <div inert={Boolean(selectedAssetId)} className='flex items-center gap-2 px-4 py-2 text-xs lg:px-5'><span className='text-muted-foreground'>来源对话</span><Badge variant='secondary'>{initialSessionTitle ?? sessionFilterId}<button type='button' aria-label='清除来源对话筛选' onClick={() => { setSessionFilterId(undefined); setSelectedIds([]) }}><X className='size-3' /></button></Badge></div> : null}
+          {selectedIds.length > 0 ? <div inert={Boolean(selectedAssetId)} data-slot='asset-batch-actions' className='absolute bottom-12 left-1/2 z-20 flex max-w-[calc(100%-2rem)] -translate-x-1/2 items-center gap-1 rounded-lg border bg-popover p-1 text-popover-foreground shadow-md'>
             <span className='shrink-0 px-2 text-sm font-medium tabular-nums'>已选 {selectedIds.length} 项</span>
             <Button variant='ghost' size='sm' disabled={batchExport.isPending} onClick={() => batchExport.mutate()}><Download />导出</Button>
             <DropdownMenu>
@@ -647,9 +721,11 @@ export function StudioLibrary({
             <IconButtonTooltip label='取消选择'><Button variant='ghost' size='icon-sm' aria-label='取消选择' onClick={() => setSelectedIds([])}><X /></Button></IconButtonTooltip>
           </div> : null}
           {selectedIds.length > 0 && (batch.isError || batchExport.isError || batch.isSuccess && batch.data.results.some((result) => !result.success)) ? <p role='alert' className='absolute right-4 bottom-27 left-4 z-20 mx-auto max-w-xl rounded-md border bg-popover px-3 py-2 text-xs text-destructive shadow-md'>{batch.error?.message ?? batchExport.error?.message ?? `${batch.data?.results.filter((result) => !result.success).length} 项处理失败，可重试`}</p> : null}
-          {upload.isError ? <Alert variant='destructive' className='m-4 w-auto'><AlertTitle>资产上传失败</AlertTitle><AlertDescription>{upload.error.message}<Button variant='outline' size='sm' disabled={!upload.variables || upload.isPending} onClick={() => upload.variables && upload.mutate(upload.variables)}>重试上传</Button></AlertDescription></Alert> : null}
-          {savePreferences.isError ? <Alert variant='destructive' className='m-4 w-auto'><AlertTitle>文件树设置保存失败</AlertTitle><AlertDescription>{savePreferences.error.message}<Button variant='outline' size='sm' onClick={() => savePreferences.variables && savePreferences.mutate(savePreferences.variables)}>重试保存</Button></AlertDescription></Alert> : null}
-          <ScrollArea ref={scrollRootRef} className='min-h-0 flex-1'>
+          {upload.isError ? <Alert inert={Boolean(selectedAssetId)} variant='destructive' className='m-4 w-auto'><AlertTitle>资产上传失败</AlertTitle><AlertDescription>{upload.error.message}<Button variant='outline' size='sm' disabled={!upload.variables || upload.isPending} onClick={() => upload.variables && upload.mutate(upload.variables)}>重试上传</Button></AlertDescription></Alert> : null}
+          {savePreferences.isError ? <Alert inert={Boolean(selectedAssetId)} variant='destructive' className='m-4 w-auto'><AlertTitle>文件树设置保存失败</AlertTitle><AlertDescription>{savePreferences.error.message}<Button variant='outline' size='sm' onClick={() => savePreferences.variables && savePreferences.mutate(savePreferences.variables)}>重试保存</Button></AlertDescription></Alert> : null}
+          <div className='flex min-h-0 flex-1 flex-col gap-5 overflow-y-auto xl:flex-row xl:overflow-hidden'>
+          <div inert={Boolean(selectedAssetId)} className='flex min-h-72 min-w-0 flex-1 flex-col xl:min-h-0'>
+          <ScrollArea ref={scrollRootRef} className='min-h-0 flex-1 [&_[data-slot=scroll-area-viewport]>div]:flex! [&_[data-slot=scroll-area-viewport]>div]:min-h-full [&_[data-slot=scroll-area-viewport]>div]:flex-col'>
             {projectId === undefined && (projects.isError || preferences.isError) ? (
               <LibraryState title='项目设置读取失败' onRetry={() => { void projects.refetch(); void preferences.refetch() }} />
             ) : assets.isPending || projectId === undefined ? (
@@ -662,7 +738,7 @@ export function StudioLibrary({
                   {virtualizer.getVirtualItems().map((row) => (
                     <div key={row.key} ref={virtualizer.measureElement} data-index={row.index} className='absolute top-0 left-0 grid w-full gap-3 px-4 py-2 lg:px-5' style={{ transform: `translateY(${row.start}px)`, gridTemplateColumns: `repeat(${view === 'grid' ? columns : 1}, minmax(0, 1fr))` }}>
                       {visibleAssets.slice(row.index * (view === 'grid' ? columns : 1), (row.index + 1) * (view === 'grid' ? columns : 1)).map((item) => (
-                        <AssetCard key={item.id} asset={previewAsset(item)} preview lazyText layout={view} selected={selectedIds.includes(item.id)} onSelect={() => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id])} onOpenDetails={() => setSelectedAssetId(item.id)} />
+                        <AssetCard key={item.id} asset={previewAsset(item)} preview lazyText unframed layout={view} selected={selectedIds.includes(item.id)} onSelect={selecting ? () => setSelectedIds((current) => current.includes(item.id) ? current.filter((id) => id !== item.id) : [...current, item.id]) : undefined} onOpenDetails={(_, trigger) => openAsset(item.id, trigger)} />
                       ))}
                     </div>
                   ))}
@@ -671,11 +747,15 @@ export function StudioLibrary({
               </>
             ) : hasFilters ? <LibraryState title='没有匹配的资产' actionLabel='清除筛选' onAction={clearFilters} /> : <LibraryState title='当前项目还没有资产' actionLabel='上传资产' onAction={() => fileInputRef.current?.click()} />}
           </ScrollArea>
-          <footer className='border-t px-4 py-2 text-xs text-muted-foreground tabular-nums lg:px-5'>共 {total} 项资产</footer>
+          <footer className='px-4 py-2 text-xs text-muted-foreground tabular-nums lg:px-5'>共 {total} 项资产</footer>
+          </div>
+          <LibraryAssetDetails key={selectedAssetId} projectAssetId={selectedAssetId} returnFocus={assetTriggerRef.current} projects={projects.data ?? []} onSelectProjectAsset={setSelectedAssetId} onClose={() => setSelectedAssetId(undefined)} onOpenSession={onOpenSession} onOpenVideoWork={onOpenVideoWork} />
+          </div>
+          </>}
           </div>
           </ResizablePanel>
         </ResizablePanelGroup>
-      </section>
+      <StudioProjectDialog key={String(projectDialogOpen)} open={projectDialogOpen} onOpenChange={setProjectDialogOpen} onSaved={() => { void queryClient.invalidateQueries({ queryKey: ['studio', 'library', 'projects'] }) }} />
 
       <Dialog open={treeOpen} onOpenChange={setTreeOpen}>
         <DialogContent className='flex max-h-[85svh] flex-col overflow-hidden sm:max-w-md'>
@@ -683,7 +763,6 @@ export function StudioLibrary({
           <ScrollArea className='min-h-0 flex-1'>{projectTree}</ScrollArea>
         </DialogContent>
       </Dialog>
-      <LibraryAssetDetails key={selectedAssetId} projectAssetId={selectedAssetId} projects={projects.data ?? []} onSelectProjectAsset={setSelectedAssetId} onClose={() => setSelectedAssetId(undefined)} onOpenSession={onOpenSession} />
       <Dialog open={Boolean(batchChoice)} onOpenChange={(open) => { if (!open) setBatchChoice(undefined) }}>
         <DialogContent className='sm:max-w-sm'>
           <DialogHeader><DialogTitle>{batchChoice ? batchLabels[batchChoice] : '批量操作'}</DialogTitle><DialogDescription>已选 {selectedIds.length} 项资产</DialogDescription></DialogHeader>
@@ -727,7 +806,7 @@ export function StudioLibrary({
           <AlertDialogFooter><AlertDialogCancel>取消</AlertDialogCancel><AlertDialogAction disabled={batch.isPending} onClick={(event) => { event.preventDefault(); batch.mutate({ action: 'archive', archived: true }, { onSuccess: () => setArchiveOpen(false) }) }}>归档</AlertDialogAction></AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </main>
+    </section>
   )
 }
 
@@ -747,11 +826,13 @@ function TreeName({ name }: { name: string }) {
 }
 
 export function ProjectTreeBranch({
-  project, mode, selectedProjectId, treeFocusId, onFocusTreeItem, isFirstProject, onProject, onAsset,
+  project, mode, selectedProjectId, selectedAssetId, activeGroupIds = [], treeFocusId, onFocusTreeItem, isFirstProject, onProject, onAsset,
 }: {
   project: StudioLibraryProject
   mode: StudioLibraryTreeMode
   selectedProjectId?: string
+  selectedAssetId?: string
+  activeGroupIds?: string[]
   treeFocusId?: string
   onFocusTreeItem: (id: string) => void
   isFirstProject: boolean
@@ -761,6 +842,7 @@ export function ProjectTreeBranch({
   const [manualExpanded, setManualExpanded] = useState<boolean>()
   const expanded = manualExpanded ?? project.id === selectedProjectId
   const selected = selectedProjectId === project.id
+  useEffect(() => { if (selected) setManualExpanded(true) }, [selected, selectedAssetId])
   const focusId = `project:${project.id}`
   const tree = useInfiniteQuery({
     queryKey: ['studio', 'library', 'tree', project.id, mode],
@@ -769,6 +851,11 @@ export function ProjectTreeBranch({
     initialPageParam: '',
     getNextPageParam: (page) => page.next_cursor || undefined,
   })
+  useEffect(() => {
+    if (!selectedAssetId || !expanded || !tree.hasNextPage || tree.isFetchingNextPage || tree.isError) return
+    const visible = tree.data?.pages.some(page => page.nodes.some(node => node.kind === 'asset' ? node.asset_id === selectedAssetId : activeGroupIds.includes(node.id)))
+    if (!visible) void tree.fetchNextPage()
+  }, [selectedAssetId, expanded, tree.data, tree.hasNextPage, tree.isFetchingNextPage, tree.isError, activeGroupIds, tree.fetchNextPage])
   const onArrowKey = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (event.key === 'ArrowRight') setManualExpanded(true)
     else if (event.key === 'ArrowLeft') setManualExpanded(false)
@@ -776,20 +863,17 @@ export function ProjectTreeBranch({
     event.preventDefault()
     event.stopPropagation()
   }
-  return <Collapsible open={expanded} onOpenChange={setManualExpanded} role='treeitem' aria-expanded={expanded} aria-selected={selected} className='min-w-0'>
-    <div className={cn('flex h-8 min-w-0 items-center gap-1 rounded-md hover:bg-accent', selected && 'bg-secondary')}>
-      <CollapsibleTrigger asChild>
-        <Button variant='ghost' size='sm' data-tree-focus-target='' tabIndex={treeFocusId === focusId || (!treeFocusId && isFirstProject) ? 0 : -1} onFocus={() => onFocusTreeItem(focusId)} className='min-w-0 flex-1 justify-start px-2 font-normal hover:bg-transparent [&_svg]:size-4' onKeyDown={onArrowKey} onClick={() => onProject(project.id)}>{expanded ? <FolderOpen /> : <Folder />}<TreeName name={project.name} /></Button>
-      </CollapsibleTrigger>
-      <span className='shrink-0 text-xs tabular-nums text-muted-foreground'>{project.asset_count}</span>
+  return <Collapsible open={expanded} onOpenChange={setManualExpanded} role='treeitem' aria-expanded={expanded} aria-selected={selected && !selectedAssetId} className='min-w-0'>
+    <div className={cn('flex h-9 min-w-0 items-center rounded-md hover:bg-accent', selected && !selectedAssetId && 'bg-secondary')}>
       <CollapsibleTrigger asChild>
         <Button variant='ghost' size='icon-sm' tabIndex={-1} className='shrink-0' aria-label={expanded ? `收起${project.name}` : `展开${project.name}`}><ChevronRight className={cn('transition-transform duration-150 motion-reduce:transition-none', expanded && 'rotate-90')} /></Button>
       </CollapsibleTrigger>
+      <Button variant='ghost' size='sm' data-tree-focus-target='' tabIndex={treeFocusId === focusId || (!treeFocusId && isFirstProject) ? 0 : -1} onFocus={() => onFocusTreeItem(focusId)} className='min-w-0 flex-1 justify-start gap-2 px-1 font-normal hover:bg-transparent' onKeyDown={onArrowKey} onClick={() => onProject(project.id)}>{expanded ? <FolderOpen /> : <Folder />}<TreeName name={project.name} /><span className='shrink-0 pr-2 text-xs tabular-nums text-muted-foreground'>{project.asset_count}</span></Button>
     </div>
     <CollapsibleContent className={treeContentClassName} inert={!expanded} aria-hidden={!expanded}>
-      <div role='group' className='ml-4 flex min-w-0 flex-col gap-0.5 border-l border-border/60 pl-[calc(var(--spacing)*1.5_-_1px)]'>
+      <div role='group' className='ml-5 flex min-w-0 flex-col gap-0.5 py-1 pl-2'>
         {tree.isPending ? <Skeleton className='h-8 w-full' /> : tree.isError ? <Button variant='ghost' size='sm' onClick={() => void tree.refetch()}>重试读取</Button> : tree.data.pages.flatMap((page) => page.nodes).map((node) => (
-          <TreeNode key={node.id} node={node} projectId={project.id} mode={mode} treeFocusId={treeFocusId} onFocusTreeItem={onFocusTreeItem} onAsset={onAsset} />
+          <TreeNode key={node.id} node={node} projectId={project.id} mode={mode} selectedAssetId={selectedAssetId} activeGroupIds={activeGroupIds} treeFocusId={treeFocusId} onFocusTreeItem={onFocusTreeItem} onAsset={onAsset} />
         ))}
         {tree.hasNextPage ? <Button variant='ghost' size='sm' disabled={tree.isFetchingNextPage} onClick={() => void tree.fetchNextPage()}>{tree.isFetchingNextPage ? '读取中…' : '加载更多'}</Button> : null}
       </div>
@@ -797,15 +881,24 @@ export function ProjectTreeBranch({
   </Collapsible>
 }
 
-export function TreeNode({ node, projectId, mode, treeFocusId, onFocusTreeItem, onAsset }: {
+export function TreeNode({ node, projectId, mode, selectedAssetId, activeGroupIds = [], treeFocusId, onFocusTreeItem, onAsset }: {
   node: StudioLibraryTreeNode
   projectId: string
   mode: StudioLibraryTreeMode
+  selectedAssetId?: string
+  activeGroupIds?: string[]
   treeFocusId?: string
   onFocusTreeItem: (id: string) => void
   onAsset: (id: string, node: StudioLibraryTreeNode) => void
 }) {
   const [expanded, setExpanded] = useState(false)
+  const selected = node.kind === 'asset' && node.asset_id === selectedAssetId
+  const reveal = Boolean(selectedAssetId && activeGroupIds.includes(node.id))
+  const buttonRef = useRef<HTMLButtonElement>(null)
+  useEffect(() => { if (reveal) setExpanded(true) }, [reveal, selectedAssetId])
+  useEffect(() => {
+    if (selected) buttonRef.current?.scrollIntoView({ block: 'nearest' })
+  }, [selected])
   const children = useInfiniteQuery({
     queryKey: ['studio', 'library', 'tree', projectId, mode, node.id],
     queryFn: ({ pageParam }) => listStudioLibraryTree({
@@ -815,6 +908,11 @@ export function TreeNode({ node, projectId, mode, treeFocusId, onFocusTreeItem, 
     initialPageParam: '',
     getNextPageParam: (page) => page.next_cursor || undefined,
   })
+  useEffect(() => {
+    if (!reveal || !expanded || !children.hasNextPage || children.isFetchingNextPage || children.isError) return
+    const visible = children.data?.pages.some(page => page.nodes.some(child => child.kind === 'asset' ? child.asset_id === selectedAssetId : activeGroupIds.includes(child.id)))
+    if (!visible) void children.fetchNextPage()
+  }, [reveal, expanded, selectedAssetId, children.data, children.hasNextPage, children.isFetchingNextPage, children.isError, activeGroupIds, children.fetchNextPage])
   const focusId = `node:${projectId}:${node.id}`
   const onArrowKey = (event: KeyboardEvent<HTMLButtonElement>) => {
     if (node.kind !== 'group') return
@@ -824,15 +922,16 @@ export function TreeNode({ node, projectId, mode, treeFocusId, onFocusTreeItem, 
     event.preventDefault()
     event.stopPropagation()
   }
-  return <Collapsible open={expanded} role='treeitem' aria-expanded={node.kind === 'group' ? expanded : undefined} className='min-w-0'>
+  return <Collapsible open={expanded} role='treeitem' data-asset-id={node.asset_id} data-group-id={node.kind === 'group' ? node.id : undefined} aria-selected={selected} aria-expanded={node.kind === 'group' ? expanded : undefined} className='min-w-0'>
     <div className='flex h-8 min-w-0 items-center'>
           <Button
+            ref={buttonRef}
             variant='ghost'
             size='sm'
             data-tree-focus-target=''
             tabIndex={treeFocusId === focusId ? 0 : -1}
             onFocus={() => onFocusTreeItem(focusId)}
-            className='min-w-0 flex-1 justify-start px-2 font-normal [&_svg]:size-4'
+            className={cn('min-w-0 flex-1 justify-start gap-2 px-2 font-normal', selected && 'bg-secondary font-medium')}
             onKeyDown={onArrowKey}
             onClick={() => {
               if (node.kind === 'asset') {
@@ -842,6 +941,7 @@ export function TreeNode({ node, projectId, mode, treeFocusId, onFocusTreeItem, 
               setExpanded((value) => !value)
             }}
           >
+            {node.kind === 'group' ? <ChevronRight className={cn('transition-transform duration-150 motion-reduce:transition-none', expanded && 'rotate-90')} /> : null}
             {node.kind === 'asset' ? <AssetKindIcon kind={node.asset_kind} data-icon='inline-start' /> : mode === 'session' ? <MessageCircle /> : mode === 'category' ? expanded ? <FolderOpen /> : <Folder /> : mode === 'rating' ? <Star /> : mode === 'tag' ? <Tag /> : <Library />}
             <TreeName name={node.label} />
             {node.kind === 'group' ? <span className='shrink-0 tabular-nums text-muted-foreground'>{node.count}</span> : null}
@@ -849,7 +949,7 @@ export function TreeNode({ node, projectId, mode, treeFocusId, onFocusTreeItem, 
     </div>
     {node.kind === 'group' ? <CollapsibleContent className={treeContentClassName} inert={!expanded} aria-hidden={!expanded}>
       <div role='group' className='ml-4 flex min-w-0 flex-col pl-1.5'>
-        {children.isPending ? <Skeleton className='h-8 w-full' /> : children.isError ? <Button variant='ghost' size='sm' onClick={() => void children.refetch()}>重试读取</Button> : children.data.pages.flatMap((page) => page.nodes).map((child) => <TreeNode key={child.id} node={child} projectId={projectId} mode={mode} treeFocusId={treeFocusId} onFocusTreeItem={onFocusTreeItem} onAsset={onAsset} />)}
+        {children.isPending ? <Skeleton className='h-8 w-full' /> : children.isError ? <Button variant='ghost' size='sm' onClick={() => void children.refetch()}>重试读取</Button> : children.data.pages.flatMap((page) => page.nodes).map((child) => <TreeNode key={child.id} node={child} projectId={projectId} mode={mode} selectedAssetId={selectedAssetId} activeGroupIds={activeGroupIds} treeFocusId={treeFocusId} onFocusTreeItem={onFocusTreeItem} onAsset={onAsset} />)}
         {children.hasNextPage ? <Button variant='ghost' size='sm' disabled={children.isFetchingNextPage} onClick={() => void children.fetchNextPage()}>加载更多</Button> : null}
       </div>
     </CollapsibleContent> : null}
@@ -857,15 +957,17 @@ export function TreeNode({ node, projectId, mode, treeFocusId, onFocusTreeItem, 
 }
 
 function LibraryState({ title, onRetry, actionLabel, onAction }: { title: string; onRetry?: () => void; actionLabel?: string; onAction?: () => void }) {
-  return <Empty className='min-h-80'><EmptyHeader><Library className='size-8 text-muted-foreground' /><EmptyTitle>{title}</EmptyTitle></EmptyHeader>{onRetry || onAction ? <EmptyContent>{onRetry ? <Button variant='outline' onClick={onRetry}>重试读取</Button> : null}{onAction ? <Button variant='outline' onClick={onAction}>{actionLabel}</Button> : null}</EmptyContent> : null}</Empty>
+  return <Empty><EmptyHeader><Library className='size-8 text-muted-foreground' /><EmptyTitle>{title}</EmptyTitle></EmptyHeader>{onRetry || onAction ? <EmptyContent>{onRetry ? <Button variant='outline' onClick={onRetry}>重试读取</Button> : null}{onAction ? <Button variant='outline' onClick={onAction}>{actionLabel}</Button> : null}</EmptyContent> : null}</Empty>
 }
 
-function LibraryAssetDetails({ projectAssetId, projects, onSelectProjectAsset, onClose, onOpenSession }: {
+function LibraryAssetDetails({ projectAssetId, projects, onSelectProjectAsset, onClose, onOpenSession, onOpenVideoWork, returnFocus }: {
   projectAssetId?: string
+  returnFocus?: HTMLElement | null
   projects: StudioLibraryProject[]
   onSelectProjectAsset: (id: string) => void
   onClose: () => void
   onOpenSession: (sessionId: string, sourceRunId?: string) => void
+  onOpenVideoWork: (work: StudioVideoWork, location?: VideoReferenceLocation) => Promise<void>
 }) {
   const queryClient = useQueryClient()
   const [expanded, setExpanded] = useState(false)
@@ -969,18 +1071,25 @@ function LibraryAssetDetails({ projectAssetId, projects, onSelectProjectAsset, o
 
   const footer = item ? <>
     {downloadError || patch.isError || saveTags.isError || createTag.isError || copy.isError || changeVersion.isError || retryPalette.isError ? <p role='alert' className='mb-2 text-sm text-destructive'>{downloadError || patch.error?.message || saveTags.error?.message || createTag.error?.message || copy.error?.message || changeVersion.error?.message || retryPalette.error?.message}</p> : null}
-    <div className='flex flex-wrap gap-2'>
+  </> : undefined
+  const actions = item ? <>
       <Button variant='default' size='sm' onClick={() => setUseOpen(true)}>用于创作</Button>
-      <Button variant='outline' size='sm' disabled={exportAsset.isPending} onClick={() => exportAsset.mutate()}><Download />导出</Button>
-      <Button variant='outline' size='sm' asChild><a href={`${baseURL()}${item.version.content_url}`} target='_blank' rel='noreferrer'>打开原文件</a></Button>
-      <Button variant='outline' size='sm' disabled={patch.isPending} onClick={() => item.archived_at ? patch.mutate({ archived: false }) : setArchiveOpen(true)}>{item.archived_at ? '恢复资产' : '归档资产'}</Button>
-    </div>
+      <DropdownMenu><DropdownMenuTrigger asChild><Button variant='ghost' size='icon-sm' aria-label='更多资产操作'><Ellipsis /></Button></DropdownMenuTrigger><DropdownMenuContent align='end'><DropdownMenuGroup>
+        <DropdownMenuItem asChild><a href={`${baseURL()}${item.version.content_url}`} download={item.display_name}><Download />下载资产</a></DropdownMenuItem>
+        <DropdownMenuItem disabled={exportAsset.isPending} onSelect={() => exportAsset.mutate()}>导出资产</DropdownMenuItem>
+        <DropdownMenuItem asChild><a href={`${baseURL()}${item.version.content_url}`} target='_blank' rel='noreferrer'>打开原文件</a></DropdownMenuItem>
+        <DropdownMenuItem disabled={patch.isPending} onSelect={() => item.archived_at ? patch.mutate({ archived: false }) : setArchiveOpen(true)}>{item.archived_at ? '恢复资产' : '归档资产'}</DropdownMenuItem>
+      </DropdownMenuGroup></DropdownMenuContent></DropdownMenu>
   </> : undefined
   return <><AssetDetailsDialog
+    inline
+    actions={actions}
+    location={item ? <span className='hidden max-w-36 truncate text-sm text-muted-foreground sm:inline'>{projects.find(project => project.id === item.project_id)?.name} /</span> : undefined}
+    returnFocus={returnFocus}
     open={Boolean(projectAssetId)} onOpenChange={(open) => { if (!open) close() }} asset={preview} expanded={expanded} onExpandedChange={setExpanded}
     description={item ? `固定版本 v${item.version.version}` : '读取资产中…'}
     nameEditor={editingName ? <form className='flex gap-2' onSubmit={(event) => { event.preventDefault(); if (name.trim()) patch.mutate({ display_name: name.trim() }, { onSuccess: () => setEditingName(false) }) }}><Input autoFocus aria-label='资产名称' value={name} onChange={(event) => setName(event.target.value)} /><Button type='submit' disabled={!name.trim() || patch.isPending}>保存</Button></form> : undefined}
-    nameAction={item ? <Button variant='ghost' size='icon-sm' className='shrink-0' aria-label='重命名资产' onClick={() => { setName(item.display_name); setEditingName(true) }}><Pencil /></Button> : undefined}
+    nameAction={item ? <Button variant='ghost' size='icon-sm' className='shrink-0' aria-label='重命名资产' onClick={() => { setExpanded(false); setName(item.display_name); setEditingName(true) }}><Pencil /></Button> : undefined}
     footer={footer}
     fallback={detail.isPending ? <Skeleton className='m-5 min-h-0 flex-1' /> : detail.isError ? <LibraryState title='资产详情读取失败' onRetry={() => void detail.refetch()} /> : undefined}
   >
@@ -1012,6 +1121,7 @@ function LibraryAssetDetails({ projectAssetId, projects, onSelectProjectAsset, o
               {source ? <div className='flex items-center justify-between gap-2 text-sm'><span className='min-w-0 truncate'>{source.session_title_snapshot}</span>{source.session_available ? <Button variant='outline' size='sm' onClick={() => { close(); onOpenSession(source.session_id, source.run_id) }}>打开对话</Button> : <span className='text-muted-foreground'>对话已删除</span>}</div> : <p className='text-sm text-muted-foreground'>无来源对话</p>}
               {item.copy_source ? <p className='text-xs text-muted-foreground'>复制来源：{item.copy_source.project_name_snapshot || '未归属项目'} / {item.copy_source.display_name}{item.copy_source.deleted ? '（来源条目已删除）' : ''}</p> : null}
             </section>
+            <VideoAssetUsages assetId={item.asset_id} onOpen={onOpenVideoWork} />
             {matchingAssets.length > 0 ? <section className='flex flex-col gap-2'><h2 className='text-sm font-semibold'>发现相同文件</h2>{matchingAssets.map((candidate) => <Button key={candidate.id} variant='outline' size='sm' className='h-auto justify-start text-left' onClick={() => onSelectProjectAsset(candidate.id)}><span className='min-w-0 truncate'>{candidate.display_name}</span><span className='ml-auto shrink-0 text-xs text-muted-foreground'>{projects.find((project) => project.id === candidate.project_id)?.name ?? '项目已删除'}</span></Button>)}</section> : null}
             <section className='flex flex-col gap-2'><h2 className='text-sm font-semibold'>版本</h2>
               <Select value={versionId || item.asset_version_id} onValueChange={setVersionId}><SelectTrigger aria-label='选择资产版本' className='w-full'><SelectValue /></SelectTrigger><SelectContent><SelectGroup>{item.versions.map((version) => <SelectItem key={version.id} value={version.id}>v{version.version} · {formatDate(version.created_at)}</SelectItem>)}</SelectGroup></SelectContent></Select>

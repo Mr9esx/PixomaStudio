@@ -6,7 +6,6 @@ import {
   useRef,
   useState,
   type CSSProperties,
-  type RefObject,
 } from 'react'
 import type { AssistantState } from '@assistant-ui/react'
 import {
@@ -28,7 +27,6 @@ type TurnItem = {
 
 type Props = {
   messages: readonly ThreadMessage[]
-  composerRef: RefObject<HTMLDivElement | null>
 }
 
 const TURN_SPACING = 10
@@ -64,7 +62,7 @@ function preferredBehavior(): ScrollBehavior {
     : 'smooth'
 }
 
-export function StudioTurnNavigator({ messages, composerRef }: Props) {
+export function StudioTurnNavigator({ messages }: Props) {
   const items = useMemo(() => turnItems(messages), [messages])
   const itemsRef = useRef(items)
   itemsRef.current = items
@@ -92,9 +90,7 @@ export function StudioTurnNavigator({ messages, composerRef }: Props) {
       frame = 0
       const currentItems = itemsRef.current
       const last = currentItems.at(-1)
-      const composerHeight =
-        composerRef.current?.getBoundingClientRect().height ?? 0
-      setBandHeight(Math.max(0, scroll.clientHeight - composerHeight))
+      setBandHeight(scroll.clientHeight)
       if (!last) {
         setActiveTurn(null)
         return
@@ -124,7 +120,6 @@ export function StudioTurnNavigator({ messages, composerRef }: Props) {
     const observer = new ResizeObserver(schedule)
     observer.observe(scroll)
     if (contentRef.current) observer.observe(contentRef.current)
-    if (composerRef.current) observer.observe(composerRef.current)
     scroll.addEventListener('scroll', schedule, { passive: true })
     window.addEventListener('resize', schedule)
     schedule()
@@ -134,7 +129,7 @@ export function StudioTurnNavigator({ messages, composerRef }: Props) {
       scroll.removeEventListener('scroll', schedule)
       window.removeEventListener('resize', schedule)
     }
-  }, [composerRef, contentRef, items.length, scrollRef])
+  }, [contentRef, items.length, scrollRef])
 
   const focusedIndex =
     focusedTurn === null

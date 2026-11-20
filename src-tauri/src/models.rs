@@ -1,4 +1,4 @@
-use crate::{Error, Result, Store, credentials, settings::ModelInput};
+use crate::{Error, Result, Store, settings::ModelInput};
 use rig::{
     DynModel,
     completion::{CompletionRequest, Effort, Reasoning},
@@ -140,36 +140,23 @@ pub(crate) fn with_reasoning(
 }
 
 impl Store {
-    pub(crate) async fn configured_model(&self, account: &str, id: &str) -> Result<ModelInput> {
-        Self::check_account(account)?;
-        let row = sqlx::query(
-            "SELECT document,credential_ref FROM model_configs WHERE account_id=? AND id=?",
-        )
-        .bind(account)
-        .bind(id)
-        .fetch_optional(&self.pool)
-        .await?
-        .ok_or(Error::NotFound)?;
+    pub(crate) async fn configured_model(&self, id: &str) -> Result<ModelInput> {
+        let row = sqlx::query("SELECT document,api_key FROM model_configs WHERE id=?")
+            .bind(id)
+            .fetch_optional(&self.pool)
+            .await?
+            .ok_or(Error::NotFound)?;
         let mut input: ModelInput = serde_json::from_str(row.get("document"))?;
-        if let Some(reference) = row.get::<Option<String>, _>("credential_ref") {
-            input.api_key = credentials::load(&reference)?
-                .ok_or(Error::State("模型凭据不存在，请重新配置 API Key"))?;
-        }
+        input.api_key = row.get("api_key");
         input.validate()?;
         Ok(input)
     }
 
-    pub(crate) async fn test_model(&self, account: &str, id: &str) -> Result<Value> {
-        self.probe_model(self.configured_model(account, id).await?)
-            .await
+    pub(crate) async fn test_model(&self, id: &str) -> Result<Value> {
+        self.probe_model(self.configured_model(id).await?).await
     }
 
-    pub(crate) async fn test_model_input(
-        &self,
-        account: &str,
-        mut document: Value,
-    ) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn test_model_input(&self, mut document: Value) -> Result<Value> {
         let fields = document
             .as_object_mut()
             .ok_or(Error::Invalid("模型配置无效"))?;
@@ -179,10 +166,7 @@ impl Store {
         input.validate()?;
         if let Some(existing) = existing {
             let saved = self
-                .configured_model(
-                    account,
-                    existing.as_str().ok_or(Error::Invalid("模型标识无效"))?,
-                )
+                .configured_model(existing.as_str().ok_or(Error::Invalid("模型标识无效"))?)
                 .await?;
             if input.api_key.is_empty() {
                 input.api_key = saved.api_key;

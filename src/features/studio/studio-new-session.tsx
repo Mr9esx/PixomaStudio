@@ -33,10 +33,8 @@ import {
 import {
   PromptInput,
   PromptInputBody,
-  PromptInputFooter,
   PromptInputHeader,
   PromptInputSubmit,
-  PromptInputTools,
 } from '@/components/ai-elements/prompt-input'
 import {
   AssetPicker,
@@ -45,7 +43,7 @@ import {
   StudioImagePicker,
   WorkflowPicker,
 } from './studio-chat'
-import { ModelPicker, PermissionPicker } from './studio-chat-controls'
+import { ModelPicker, PermissionPicker, StudioComposerFooter } from './studio-chat-controls'
 import {
   StudioComposer,
   type StudioComposerHandle,
@@ -234,11 +232,8 @@ export function StudioNewSession({
   const activity = studioNewSessionActivity(send.isPending, sendingImages)
 
   return (
-    <main
-      id='main-content'
-      className='flex min-h-0 min-w-0 flex-1 py-3 pr-3 sm:py-4 sm:pr-4'
-    >
-      <div className='flex min-h-0 w-full items-center justify-center rounded-2xl border bg-card pt-16 pb-20'>
+    <div className='flex min-h-0 min-w-0 flex-1 overflow-y-auto'>
+      <div className='flex min-h-full w-full items-center justify-center pt-16 pb-20'>
         <div className='w-full max-w-3xl px-5'>
           <h1 className='mb-7 text-center font-heading text-2xl font-medium'>
             新对话
@@ -387,8 +382,7 @@ export function StudioNewSession({
                   }
                 />
               </PromptInputBody>
-              <PromptInputFooter className='flex-wrap sm:flex-nowrap'>
-                <PromptInputTools>
+              <StudioComposerFooter tools={<>
                   <StudioImagePicker
                     unsupported={Boolean(
                       selectedModel && !selectedModel.capabilities.vision
@@ -439,15 +433,13 @@ export function StudioNewSession({
                       })
                     }
                   />
-                  <PermissionPicker
+                </>} permission={<PermissionPicker
                     value={permissionMode}
                     onChange={(value) => {
                       requestId.current = undefined
                       setPermissionMode(value)
                     }}
-                  />
-                </PromptInputTools>
-                <PromptInputTools className='max-sm:w-full max-sm:justify-between'>
+                  />}>
                   <ModelPicker
                     models={availableModels}
                     value={selectedModel?.id}
@@ -457,8 +449,8 @@ export function StudioNewSession({
                     }}
                   />
                   <PromptInputSubmit
-                    className='size-9 rounded-full'
-                    size='icon-sm'
+                    className='rounded-full'
+                    size='icon-xs'
                     disabled={
                       !selectedModel ||
                       (Boolean(projectId) && !selectedProject) ||
@@ -469,8 +461,7 @@ export function StudioNewSession({
                   >
                     {send.isPending ? <Spinner data-icon='inline-start' /> : <ArrowUp data-icon='inline-start' />}
                   </PromptInputSubmit>
-                </PromptInputTools>
-              </PromptInputFooter>
+              </StudioComposerFooter>
             </PromptInput>
           </div>
           {activity ? (
@@ -496,6 +487,6 @@ export function StudioNewSession({
           onSaved={(project) => chooseProject(project.id)}
         />
       ) : null}
-    </main>
+    </div>
   )
 }

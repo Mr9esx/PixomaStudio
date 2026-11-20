@@ -17,13 +17,11 @@ import { Route as AppStudioExpertsRouteImport } from './routes/_app/studio.exper
 import { Route as AppStudioLibraryRouteImport } from './routes/_app/studio.library'
 import { Route as AppStudioSkillsRouteImport } from './routes/_app/studio.skills'
 import { Route as AppStudioWorkflowsRouteImport } from './routes/_app/studio.workflows'
-import { Route as AppStudioLoginRouteImport } from './routes/_app/studio_.login'
-import { Route as AppStudioRegisterRouteImport } from './routes/_app/studio_.register'
+import { Route as AppStudioExpertEditorExpertIdRouteImport } from './routes/_app/studio.expert-editor.$expertId'
 import { Route as AppStudioSessionsSessionIdRouteImport } from './routes/_app/studio.sessions.$sessionId'
 import { Route as AppStudioSettingsIndexRouteImport } from './routes/_app/studio.settings.index'
 import { Route as AppStudioSettingsSectionRouteImport } from './routes/_app/studio.settings.$section'
 import { Route as AppStudioWorkflowsWorkflowIdRouteImport } from './routes/_app/studio.workflows.$workflowId'
-import { Route as AppStudioExpertEditorExpertIdRouteImport } from './routes/_app/studio_.expert-editor.$expertId'
 import { Route as AppStudioSessionsSessionIdTraceRouteImport } from './routes/_app/studio.sessions.$sessionId.trace'
 
 const IndexRoute = IndexRouteImport.update({
@@ -65,16 +63,12 @@ const AppStudioWorkflowsRoute = AppStudioWorkflowsRouteImport.update({
   path: '/workflows',
   getParentRoute: () => AppStudioRoute,
 } as any)
-const AppStudioLoginRoute = AppStudioLoginRouteImport.update({
-  id: '/studio_/login',
-  path: '/studio/login',
-  getParentRoute: () => AppRoute,
-} as any)
-const AppStudioRegisterRoute = AppStudioRegisterRouteImport.update({
-  id: '/studio_/register',
-  path: '/studio/register',
-  getParentRoute: () => AppRoute,
-} as any)
+const AppStudioExpertEditorExpertIdRoute =
+  AppStudioExpertEditorExpertIdRouteImport.update({
+    id: '/expert-editor/$expertId',
+    path: '/expert-editor/$expertId',
+    getParentRoute: () => AppStudioRoute,
+  } as any)
 const AppStudioSessionsSessionIdRoute =
   AppStudioSessionsSessionIdRouteImport.update({
     id: '/sessions/$sessionId',
@@ -98,12 +92,6 @@ const AppStudioWorkflowsWorkflowIdRoute =
     path: '/$workflowId',
     getParentRoute: () => AppStudioWorkflowsRoute,
   } as any)
-const AppStudioExpertEditorExpertIdRoute =
-  AppStudioExpertEditorExpertIdRouteImport.update({
-    id: '/studio_/expert-editor/$expertId',
-    path: '/studio/expert-editor/$expertId',
-    getParentRoute: () => AppRoute,
-  } as any)
 const AppStudioSessionsSessionIdTraceRoute =
   AppStudioSessionsSessionIdTraceRouteImport.update({
     id: '/trace',
@@ -118,13 +106,11 @@ export interface FileRoutesByFullPath {
   '/studio/library': typeof AppStudioLibraryRoute
   '/studio/skills': typeof AppStudioSkillsRoute
   '/studio/workflows': typeof AppStudioWorkflowsRouteWithChildren
-  '/studio/login': typeof AppStudioLoginRoute
-  '/studio/register': typeof AppStudioRegisterRoute
   '/studio/': typeof AppStudioIndexRoute
+  '/studio/expert-editor/$expertId': typeof AppStudioExpertEditorExpertIdRoute
   '/studio/sessions/$sessionId': typeof AppStudioSessionsSessionIdRouteWithChildren
   '/studio/settings/$section': typeof AppStudioSettingsSectionRoute
   '/studio/workflows/$workflowId': typeof AppStudioWorkflowsWorkflowIdRoute
-  '/studio/expert-editor/$expertId': typeof AppStudioExpertEditorExpertIdRoute
   '/studio/settings/': typeof AppStudioSettingsIndexRoute
   '/studio/sessions/$sessionId/trace': typeof AppStudioSessionsSessionIdTraceRoute
 }
@@ -134,13 +120,11 @@ export interface FileRoutesByTo {
   '/studio/library': typeof AppStudioLibraryRoute
   '/studio/skills': typeof AppStudioSkillsRoute
   '/studio/workflows': typeof AppStudioWorkflowsRouteWithChildren
-  '/studio/login': typeof AppStudioLoginRoute
-  '/studio/register': typeof AppStudioRegisterRoute
   '/studio': typeof AppStudioIndexRoute
+  '/studio/expert-editor/$expertId': typeof AppStudioExpertEditorExpertIdRoute
   '/studio/sessions/$sessionId': typeof AppStudioSessionsSessionIdRouteWithChildren
   '/studio/settings/$section': typeof AppStudioSettingsSectionRoute
   '/studio/workflows/$workflowId': typeof AppStudioWorkflowsWorkflowIdRoute
-  '/studio/expert-editor/$expertId': typeof AppStudioExpertEditorExpertIdRoute
   '/studio/settings': typeof AppStudioSettingsIndexRoute
   '/studio/sessions/$sessionId/trace': typeof AppStudioSessionsSessionIdTraceRoute
 }
@@ -153,13 +137,11 @@ export interface FileRoutesById {
   '/_app/studio/library': typeof AppStudioLibraryRoute
   '/_app/studio/skills': typeof AppStudioSkillsRoute
   '/_app/studio/workflows': typeof AppStudioWorkflowsRouteWithChildren
-  '/_app/studio_/login': typeof AppStudioLoginRoute
-  '/_app/studio_/register': typeof AppStudioRegisterRoute
   '/_app/studio/': typeof AppStudioIndexRoute
+  '/_app/studio/expert-editor/$expertId': typeof AppStudioExpertEditorExpertIdRoute
   '/_app/studio/sessions/$sessionId': typeof AppStudioSessionsSessionIdRouteWithChildren
   '/_app/studio/settings/$section': typeof AppStudioSettingsSectionRoute
   '/_app/studio/workflows/$workflowId': typeof AppStudioWorkflowsWorkflowIdRoute
-  '/_app/studio_/expert-editor/$expertId': typeof AppStudioExpertEditorExpertIdRoute
   '/_app/studio/settings/': typeof AppStudioSettingsIndexRoute
   '/_app/studio/sessions/$sessionId/trace': typeof AppStudioSessionsSessionIdTraceRoute
 }
@@ -172,13 +154,11 @@ export interface FileRouteTypes {
     | '/studio/library'
     | '/studio/skills'
     | '/studio/workflows'
-    | '/studio/login'
-    | '/studio/register'
     | '/studio/'
+    | '/studio/expert-editor/$expertId'
     | '/studio/sessions/$sessionId'
     | '/studio/settings/$section'
     | '/studio/workflows/$workflowId'
-    | '/studio/expert-editor/$expertId'
     | '/studio/settings/'
     | '/studio/sessions/$sessionId/trace'
   fileRoutesByTo: FileRoutesByTo
@@ -188,13 +168,11 @@ export interface FileRouteTypes {
     | '/studio/library'
     | '/studio/skills'
     | '/studio/workflows'
-    | '/studio/login'
-    | '/studio/register'
     | '/studio'
+    | '/studio/expert-editor/$expertId'
     | '/studio/sessions/$sessionId'
     | '/studio/settings/$section'
     | '/studio/workflows/$workflowId'
-    | '/studio/expert-editor/$expertId'
     | '/studio/settings'
     | '/studio/sessions/$sessionId/trace'
   id:
@@ -206,13 +184,11 @@ export interface FileRouteTypes {
     | '/_app/studio/library'
     | '/_app/studio/skills'
     | '/_app/studio/workflows'
-    | '/_app/studio_/login'
-    | '/_app/studio_/register'
     | '/_app/studio/'
+    | '/_app/studio/expert-editor/$expertId'
     | '/_app/studio/sessions/$sessionId'
     | '/_app/studio/settings/$section'
     | '/_app/studio/workflows/$workflowId'
-    | '/_app/studio_/expert-editor/$expertId'
     | '/_app/studio/settings/'
     | '/_app/studio/sessions/$sessionId/trace'
   fileRoutesById: FileRoutesById
@@ -280,19 +256,12 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof AppStudioWorkflowsRouteImport
       parentRoute: typeof AppStudioRoute
     }
-    '/_app/studio_/login': {
-      id: '/_app/studio_/login'
-      path: '/studio/login'
-      fullPath: '/studio/login'
-      preLoaderRoute: typeof AppStudioLoginRouteImport
-      parentRoute: typeof AppRoute
-    }
-    '/_app/studio_/register': {
-      id: '/_app/studio_/register'
-      path: '/studio/register'
-      fullPath: '/studio/register'
-      preLoaderRoute: typeof AppStudioRegisterRouteImport
-      parentRoute: typeof AppRoute
+    '/_app/studio/expert-editor/$expertId': {
+      id: '/_app/studio/expert-editor/$expertId'
+      path: '/expert-editor/$expertId'
+      fullPath: '/studio/expert-editor/$expertId'
+      preLoaderRoute: typeof AppStudioExpertEditorExpertIdRouteImport
+      parentRoute: typeof AppStudioRoute
     }
     '/_app/studio/sessions/$sessionId': {
       id: '/_app/studio/sessions/$sessionId'
@@ -321,13 +290,6 @@ declare module '@tanstack/react-router' {
       fullPath: '/studio/workflows/$workflowId'
       preLoaderRoute: typeof AppStudioWorkflowsWorkflowIdRouteImport
       parentRoute: typeof AppStudioWorkflowsRoute
-    }
-    '/_app/studio_/expert-editor/$expertId': {
-      id: '/_app/studio_/expert-editor/$expertId'
-      path: '/studio/expert-editor/$expertId'
-      fullPath: '/studio/expert-editor/$expertId'
-      preLoaderRoute: typeof AppStudioExpertEditorExpertIdRouteImport
-      parentRoute: typeof AppRoute
     }
     '/_app/studio/sessions/$sessionId/trace': {
       id: '/_app/studio/sessions/$sessionId/trace'
@@ -370,6 +332,7 @@ interface AppStudioRouteChildren {
   AppStudioSkillsRoute: typeof AppStudioSkillsRoute
   AppStudioWorkflowsRoute: typeof AppStudioWorkflowsRouteWithChildren
   AppStudioIndexRoute: typeof AppStudioIndexRoute
+  AppStudioExpertEditorExpertIdRoute: typeof AppStudioExpertEditorExpertIdRoute
   AppStudioSessionsSessionIdRoute: typeof AppStudioSessionsSessionIdRouteWithChildren
   AppStudioSettingsSectionRoute: typeof AppStudioSettingsSectionRoute
   AppStudioSettingsIndexRoute: typeof AppStudioSettingsIndexRoute
@@ -381,6 +344,7 @@ const AppStudioRouteChildren: AppStudioRouteChildren = {
   AppStudioSkillsRoute: AppStudioSkillsRoute,
   AppStudioWorkflowsRoute: AppStudioWorkflowsRouteWithChildren,
   AppStudioIndexRoute: AppStudioIndexRoute,
+  AppStudioExpertEditorExpertIdRoute: AppStudioExpertEditorExpertIdRoute,
   AppStudioSessionsSessionIdRoute: AppStudioSessionsSessionIdRouteWithChildren,
   AppStudioSettingsSectionRoute: AppStudioSettingsSectionRoute,
   AppStudioSettingsIndexRoute: AppStudioSettingsIndexRoute,
@@ -392,16 +356,10 @@ const AppStudioRouteWithChildren = AppStudioRoute._addFileChildren(
 
 interface AppRouteChildren {
   AppStudioRoute: typeof AppStudioRouteWithChildren
-  AppStudioLoginRoute: typeof AppStudioLoginRoute
-  AppStudioRegisterRoute: typeof AppStudioRegisterRoute
-  AppStudioExpertEditorExpertIdRoute: typeof AppStudioExpertEditorExpertIdRoute
 }
 
 const AppRouteChildren: AppRouteChildren = {
   AppStudioRoute: AppStudioRouteWithChildren,
-  AppStudioLoginRoute: AppStudioLoginRoute,
-  AppStudioRegisterRoute: AppStudioRegisterRoute,
-  AppStudioExpertEditorExpertIdRoute: AppStudioExpertEditorExpertIdRoute,
 }
 
 const AppRouteWithChildren = AppRoute._addFileChildren(AppRouteChildren)

@@ -1,4 +1,4 @@
-use pixoma_studio::{LocalApi, LocalRequest, PlatformClient, Store};
+use pixoma_studio::{LocalApi, LocalRequest, Store};
 use serde_json::{Value, json};
 use std::path::PathBuf;
 
@@ -13,35 +13,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .truncate(false)
         .open(root.join(".application.lock"))?;
     lock.try_lock()?;
-    let platform = PlatformClient::new(&std::env::var("PIXOMA_TEST_PLATFORM_URL")?)?;
-    let password = std::env::var("PIXOMA_TEST_STUDIO_PASSWORD")?;
-    platform
-        .request_auth(
-            "POST",
-            "login",
-            Some(json!({
-                "username": std::env::var("PIXOMA_TEST_STUDIO_USERNAME")?,
-                "password": password,
-                "remember_me": false,
-            })),
-        )
-        .await?;
-    platform
-        .request_auth(
-            "POST",
-            "password",
-            Some(json!({
-                "current_password": password,
-                "new_password": std::env::var("PIXOMA_BUNDLE_TEST_PASSWORD")?,
-            })),
-        )
-        .await?;
-    let account = platform.account_scope().await?;
-    let store = Store::open(&root.join("studio.sqlite")).await?;
+    let store = Store::open(&root.join("studio-standalone.sqlite")).await?;
     let api = LocalApi::new(store.clone());
     let model: Value = serde_json::from_str(&std::env::var("PIXOMA_TEST_MODEL_CONFIG")?)?;
     api.request(
-        &account,
         LocalRequest {
             method: "POST".to_owned(),
             path: "/api/v1/studio-operations/models".to_owned(),
@@ -50,7 +25,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     )
     .await?;
     api.request(
-        &account,
         LocalRequest {
             method: "POST".to_owned(),
             path: "/api/v1/studio-operations/connectors".to_owned(),
@@ -64,7 +38,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         },
     )
     .await?;
-    platform.request_auth("POST", "logout", None).await?;
     store.close().await;
     println!("安装包检查的真实模型和 MCP 配置已保存");
     Ok(())

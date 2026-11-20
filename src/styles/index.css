@@ -1,5 +1,6 @@
 @import 'tailwindcss';
 @import 'tw-animate-css';
+@import './fonts.css';
 @import './theme.css';
 
 @custom-variant dark (&:is(.dark *));
@@ -62,10 +63,43 @@
     }
   }
   html {
-    @apply overflow-x-hidden;
+    @apply overflow-x-hidden overscroll-none;
   }
   body {
-    @apply min-h-svh w-full bg-background text-foreground has-[div[data-variant='inset']]:bg-sidebar;
+    @apply min-h-svh w-full overscroll-none bg-background text-foreground has-[div[data-variant='inset']]:bg-sidebar;
+  }
+
+  button,
+  label,
+  summary,
+  select,
+  nav a,
+  [role='button'],
+  [role='tab'],
+  [role='menuitem'],
+  [role='menuitemcheckbox'],
+  [role='menuitemradio'],
+  [role='option'],
+  [data-slot='button'],
+  [data-slot='sidebar-menu-button'] {
+    @apply select-none;
+  }
+
+  input,
+  textarea {
+    @apply select-auto;
+  }
+
+  input::placeholder,
+  textarea::placeholder {
+    @apply select-none;
+  }
+
+  [contenteditable='true'],
+  [contenteditable=''],
+  [contenteditable='plaintext-only'],
+  .cm-content {
+    @apply select-text;
   }
 
   /* Override Radix scroll locking for sticky headers */
@@ -102,6 +136,48 @@
 
 .studio-chat-root {
   container-type: inline-size;
+}
+
+@layer components {
+  .studio-page-header {
+    @apply flex min-h-16 shrink-0 items-center gap-3 border-b px-5 py-1.5 pl-16 lg:pl-5;
+  }
+  .studio-continuous-header {
+    border-bottom-width: 0;
+  }
+}
+
+[data-tauri-drag-region] {
+  @apply select-none;
+}
+
+[data-platform='macos'] .studio-sidebar-header {
+  padding-top: 2.75rem;
+}
+
+[data-platform='macos'] [data-standalone] .studio-page-header {
+  padding-left: 6.5rem;
+}
+
+@media (width < 1024px) {
+  [data-platform='macos'] [data-slot='studio-mobile-menu'] {
+    left: 6.5rem;
+  }
+
+  [data-platform='macos'] .studio-page-header {
+    padding-left: 10rem;
+  }
+}
+
+@media (pointer: coarse) {
+  .studio-page-header {
+    min-height: 4.75rem;
+  }
+
+  .studio-page-header :is([data-slot='button'], [data-slot='input']) {
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+  }
 }
 
 .studio-chat-root [data-streamdown='code-block'][data-language=''] [data-streamdown='code-block-header'] {

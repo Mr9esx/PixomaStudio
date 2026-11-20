@@ -7,7 +7,6 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sqlx::Row;
 use std::collections::{BTreeMap, HashSet};
 use uuid::Uuid;
 
@@ -25,7 +24,7 @@ pub(crate) enum ExpertPart {
     },
     Workflow {
         workflow_id: String,
-        version_id: u64,
+        version_id: String,
         #[serde(skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
@@ -47,7 +46,7 @@ pub(crate) struct ExpertSkill {
 #[derive(Clone, Deserialize, Serialize)]
 pub(crate) struct ExpertWorkflow {
     pub workflow_id: String,
-    pub version_id: u64,
+    pub version_id: String,
 }
 
 #[derive(Clone, Deserialize, Serialize)]
@@ -118,11 +117,11 @@ impl ExpertContent {
                     version_id,
                     ..
                 } => {
-                    if workflow_id.is_empty() || *version_id == 0 {
+                    if workflow_id.is_empty() || version_id.is_empty() {
                         return Err(Error::Invalid("专家工作流引用无效"));
                     }
                     if workflows
-                        .insert(workflow_id.clone(), *version_id)
+                        .insert(workflow_id.clone(), version_id.clone())
                         .is_some_and(|previous| previous != *version_id)
                     {
                         return Err(Error::Invalid("同一工作流需要引用相同版本"));
@@ -147,63 +146,7 @@ impl ExpertContent {
 
 impl Store {
     pub(crate) fn expert_model_id(expert: &Value) -> Result<&str> {
-        if expert["source"] == "official" {
-            text(expert, "runtime_model_id")
-        } else {
-            text(expert, "model_id")
-        }
-    }
-
-    pub(crate) async fn cache_official_expert(
-        &self,
-        account: &str,
-        mut current: Value,
-        mut version: Value,
-        source_url: &str,
-    ) -> Result<()> {
-        Self::check_account(account)?;
-        let id = text(&current, "id")?.to_owned();
-        let version_number = text(&version, "version")?.to_owned();
-        stable_version(&version_number)?;
-        for item in [&current, &version] {
-            if serde_json::to_vec(item)?.len() > 1 << 20 {
-                return Err(Error::Invalid("官方专家内容超过 1 MiB"));
-            }
-            let mut content: ExpertContent = serde_json::from_value(item.clone())
-                .map_err(|_| Error::Invalid("官方专家内容格式无效"))?;
-            content.validate()?;
-        }
-        let mut content: ExpertContent = serde_json::from_value(version.clone())?;
-        content.validate()?;
-        let content_digest = digest(&serde_json::to_vec(&content)?);
-        let publisher_source = current["source"].clone();
-        for item in [&mut current, &mut version] {
-            item["id"] = json!(id);
-            item["account_id"] = json!(account);
-            item["source"] = json!("official");
-            item["publisher_source"] = publisher_source.clone();
-            item["source_url"] = json!(source_url);
-            item["received_at"] = json!(timestamp()?);
-        }
-        version["content_digest"] = json!(content_digest);
-        let mut transaction = self.pool.begin().await?;
-        let changed = sqlx::query("INSERT INTO experts(account_id,id,source,document) VALUES(?,?,'official',?) ON CONFLICT(account_id,id) DO UPDATE SET document=excluded.document WHERE experts.source='official'")
-            .bind(account).bind(&id).bind(current.to_string()).execute(&mut *transaction).await?;
-        if changed.rows_affected() != 1 {
-            return Err(Error::Invalid("官方专家标识与个人专家重复"));
-        }
-        let existing: Option<String> = sqlx::query_scalar("SELECT content_digest FROM expert_versions WHERE account_id=? AND expert_id=? AND version=?")
-            .bind(account).bind(&id).bind(&version_number).fetch_optional(&mut *transaction).await?;
-        if existing
-            .as_ref()
-            .is_some_and(|existing| existing != &content_digest)
-        {
-            return Err(Error::State("官方专家同一版本的内容发生变化"));
-        }
-        sqlx::query("INSERT INTO expert_versions(account_id,expert_id,version,document,content_digest) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING")
-            .bind(account).bind(&id).bind(version_number).bind(version.to_string()).bind(content_digest).execute(&mut *transaction).await?;
-        transaction.commit().await?;
-        Ok(())
+        text(expert, "model_id")
     }
 
     pub(crate) fn expert_context_input(input: &Value, expert: Option<&Value>) -> Result<Value> {
@@ -227,16 +170,16 @@ impl Store {
                 return Err(Error::Invalid("所选技能版本与专家内容不一致"));
             }
         }
-        let allowed_workflows: BTreeMap<&str, u64> = content
+        let allowed_workflows: BTreeMap<&str, &str> = content
             .workflow_refs
             .iter()
-            .map(|reference| (reference.workflow_id.as_str(), reference.version_id))
+            .map(|reference| (reference.workflow_id.as_str(), reference.version_id.as_str()))
             .collect();
         for (id, version) in crate::workflows::requested_workflows(input)? {
             let expected = allowed_workflows
                 .get(id.as_str())
                 .ok_or(Error::Invalid("专家会话只能使用已绑定的工作流"))?;
-            if version.is_some_and(|version| version != *expected) {
+            if version.as_deref().is_some_and(|version| version != *expected) {
                 return Err(Error::Invalid("所选工作流版本与专家内容不一致"));
             }
         }
@@ -262,40 +205,30 @@ impl Store {
         Ok(resolved)
     }
 
-    pub(crate) async fn list_experts(&self, account: &str) -> Result<Value> {
-        Self::check_account(account)?;
-        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM experts WHERE account_id=? AND source='user' ORDER BY json_extract(document,'$.updated_at') DESC,id")
-            .bind(account).fetch_all(&self.pool).await?;
+    pub(crate) async fn list_experts(&self) -> Result<Value> {
+        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM experts ORDER BY json_extract(document,'$.updated_at') DESC,id")
+            .fetch_all(&self.pool).await?;
         let mut experts = Vec::new();
         for row in rows {
-            let mut expert = serde_json::from_str(&row)?;
-            self.apply_publication_state(account, "expert", &mut expert)
-                .await?;
-            experts.push(self.expert_availability(account, expert).await?);
+            let expert = serde_json::from_str(&row)?;
+            experts.push(self.expert_availability(expert).await?);
         }
         Ok(json!(experts))
     }
 
-    pub(crate) async fn get_expert(&self, account: &str, id: &str) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn get_expert(&self, id: &str) -> Result<Value> {
         let document: String =
-            sqlx::query_scalar("SELECT document FROM experts WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT document FROM experts WHERE id=?")
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await?
                 .ok_or(Error::NotFound)?;
-        let mut expert = serde_json::from_str(&document)?;
-        self.apply_publication_state(account, "expert", &mut expert)
-            .await?;
-        self.expert_availability(account, expert).await
+        let expert = serde_json::from_str(&document)?;
+        self.expert_availability(expert).await
     }
 
-    async fn expert_availability(&self, account: &str, mut expert: Value) -> Result<Value> {
-        if expert["source"] != "user" {
-            return Ok(expert);
-        }
-        let reason = self.expert_unavailable_reason(account, &expert).await?;
+    async fn expert_availability(&self, mut expert: Value) -> Result<Value> {
+        let reason = self.expert_unavailable_reason(&expert).await?;
         expert["available"] = json!(reason.is_none());
         expert["unavailable_reason"] = json!(reason.unwrap_or_default());
         Ok(expert)
@@ -303,7 +236,6 @@ impl Store {
 
     pub(crate) async fn expert_unavailable_reason(
         &self,
-        account: &str,
         expert: &Value,
     ) -> Result<Option<&'static str>> {
         if expert["enabled"] != true {
@@ -311,21 +243,17 @@ impl Store {
         }
         let content: ExpertContent = serde_json::from_value(expert.clone())?;
         let model_id = Self::expert_model_id(expert)?;
-        let model: Option<String> = sqlx::query_scalar("SELECT document FROM model_configs WHERE account_id=? AND id=? AND json_extract(document,'$.enabled')=1 AND json_extract(document,'$.agent_enabled')=1")
-            .bind(account).bind(model_id).fetch_optional(&self.pool).await?;
+        let model: Option<String> = sqlx::query_scalar("SELECT document FROM model_configs WHERE id=? AND json_extract(document,'$.enabled')=1 AND json_extract(document,'$.agent_enabled')=1")
+            .bind(model_id).fetch_optional(&self.pool).await?;
         let Some(model) = model else {
             return Ok(Some("本地模型不可用于专家调用"));
         };
-        let model = if expert["source"] == "official" {
-            expert["runtime_model_snapshot"]["configuration"].clone()
-        } else {
-            serde_json::from_str::<Value>(&model)?
-        };
+        let model = serde_json::from_str::<Value>(&model)?;
         if model["capabilities"]["tools"] != true {
             return Ok(Some("本地模型不支持专家工具调用"));
         }
         for reference in content.skill_refs {
-            let skill = match self.get_skill(account, &reference.skill_id).await {
+            let skill = match self.get_skill(&reference.skill_id).await {
                 Ok(skill) => skill,
                 Err(Error::NotFound) => return Ok(Some("引用的技能尚未获取")),
                 Err(error) => return Err(error),
@@ -334,7 +262,7 @@ impl Store {
                 return Ok(Some("引用的技能已停用或不可用"));
             }
             match self
-                .skill_version(account, &reference.skill_id, &reference.version)
+                .skill_version(&reference.skill_id, &reference.version)
                 .await
             {
                 Ok(_) => {}
@@ -343,41 +271,18 @@ impl Store {
             }
         }
         for reference in content.workflow_refs {
-            let workflow = match self
-                .workflow_version(account, &reference.workflow_id, Some(reference.version_id))
-                .await
-            {
+            let workflow = match self.get_workflow(&reference.workflow_id).await {
                 Ok(workflow) => workflow,
-                Err(Error::NotFound) => return Ok(Some("引用的工作流版本尚未获取")),
+                Err(Error::NotFound) => return Ok(Some("引用的工作流不存在")),
                 Err(error) => return Err(error),
             };
-            let origin = url::Url::parse(text(&workflow, "source_url")?)
-                .map_err(|_| Error::State("工作流来源地址无效"))?
-                .origin();
-            let connectors = sqlx::query("SELECT document,tools FROM connectors WHERE account_id=? AND json_extract(document,'$.enabled')=1 AND json_extract(document,'$.policy')<>'forbidden'")
-                .bind(account).fetch_all(&self.pool).await?;
-            let mut available = false;
-            for connector in connectors {
-                let configuration: Value = serde_json::from_str(connector.get("document"))?;
-                let address = url::Url::parse(text(&configuration, "url")?)
-                    .map_err(|_| Error::State("MCP 地址无效"))?;
-                if address.origin() != origin {
-                    continue;
-                }
-                let Some(tools) = connector.get::<Option<String>, _>("tools") else {
-                    continue;
-                };
-                let tools: Vec<rmcp::model::Tool> = serde_json::from_str(&tools)?;
-                if ["run_workflow", "get_task"]
-                    .iter()
-                    .all(|name| tools.iter().any(|tool| tool.name == *name))
-                {
-                    available = true;
-                    break;
-                }
+            if workflow["enabled"] != true {
+                return Ok(Some("引用的工作流已停用"));
             }
-            if !available {
-                return Ok(Some("工作流 MCP 尚未就绪或已停用"));
+            match self.get_workflow_version(&reference.workflow_id, &reference.version_id).await {
+                Ok(_) => {}
+                Err(Error::NotFound) => return Ok(Some("引用的工作流版本不存在")),
+                Err(error) => return Err(error),
             }
         }
         Ok(None)
@@ -385,16 +290,14 @@ impl Store {
 
     pub(crate) async fn expert_version(
         &self,
-        account: &str,
         id: &str,
         version: &str,
     ) -> Result<Value> {
-        self.get_expert(account, id).await?;
+        self.get_expert(id).await?;
         stable_version(version)?;
         let document: String = sqlx::query_scalar(
-            "SELECT document FROM expert_versions WHERE account_id=? AND expert_id=? AND version=?",
+            "SELECT document FROM expert_versions WHERE expert_id=? AND version=?",
         )
-        .bind(account)
         .bind(id)
         .bind(version)
         .fetch_optional(&self.pool)
@@ -403,10 +306,10 @@ impl Store {
         Ok(serde_json::from_str(&document)?)
     }
 
-    pub(crate) async fn expert_versions(&self, account: &str, id: &str) -> Result<Value> {
-        self.get_expert(account, id).await?;
-        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM expert_versions WHERE account_id=? AND expert_id=? ORDER BY json_extract(document,'$.created_at') DESC,version DESC")
-            .bind(account).bind(id).fetch_all(&self.pool).await?;
+    pub(crate) async fn expert_versions(&self, id: &str) -> Result<Value> {
+        self.get_expert(id).await?;
+        let rows: Vec<String> = sqlx::query_scalar("SELECT document FROM expert_versions WHERE expert_id=? ORDER BY json_extract(document,'$.created_at') DESC,version DESC")
+            .bind(id).fetch_all(&self.pool).await?;
         Ok(json!(
             rows.iter()
                 .map(|row| serde_json::from_str::<Value>(row))
@@ -416,12 +319,10 @@ impl Store {
 
     pub(crate) async fn session_expert_capabilities(
         &self,
-        account: &str,
         session: &str,
     ) -> Result<Value> {
         let snapshot: Option<String> =
-            sqlx::query_scalar("SELECT expert_snapshot FROM sessions WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT expert_snapshot FROM sessions WHERE id=?")
                 .bind(session)
                 .fetch_optional(&self.pool)
                 .await?
@@ -433,7 +334,7 @@ impl Store {
         let mut skills = Vec::new();
         for reference in expert.skill_refs {
             let skill = self
-                .skill_version(account, &reference.skill_id, &reference.version)
+                .skill_version(&reference.skill_id, &reference.version)
                 .await?;
             skills.push(json!({
                 "id": reference.skill_id, "version": reference.version, "name": skill["name"],
@@ -444,7 +345,7 @@ impl Store {
         let mut workflows = Vec::new();
         for reference in expert.workflow_refs {
             workflows.push(
-                self.workflow_version(account, &reference.workflow_id, Some(reference.version_id))
+                self.workflow_version(&reference.workflow_id, Some(&reference.version_id))
                     .await?,
             );
         }
@@ -453,11 +354,9 @@ impl Store {
 
     pub async fn save_expert(
         &self,
-        account: &str,
         id: Option<&str>,
         input: Value,
     ) -> Result<Value> {
-        Self::check_account(account)?;
         if serde_json::to_vec(&input)?.len() > 1 << 20 {
             return Err(Error::Invalid("专家内容超过 1 MiB"));
         }
@@ -471,34 +370,30 @@ impl Store {
         let notes = optional_text(&input, "notes", "")?;
         let parsed_version = stable_version(version)?;
         let previous = match id {
-            Some(id) => Some(self.get_expert(account, id).await?),
+            Some(id) => Some(self.get_expert(id).await?),
             None => None,
         };
-        if let Some(previous) = &previous {
-            if previous["source"] != "user" {
-                return Err(Error::Invalid("官方专家版本只允许读取"));
-            }
-            if input["updated_at"] != previous["updated_at"]
+        if let Some(previous) = &previous
+            && (input["updated_at"] != previous["updated_at"]
                 || parsed_version <= stable_version(text(previous, "version")?)?
-            {
+            ) {
                 return Err(Error::Invalid("专家已更新或版本号没有增加"));
-            }
         }
-        let model_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM model_configs WHERE account_id=? AND id=? AND json_extract(document,'$.enabled')=1 AND json_extract(document,'$.agent_enabled')=1 AND json_extract(document,'$.capabilities.tools')=1)")
-            .bind(account).bind(&content.model_id).fetch_one(&self.pool).await?;
+        let model_exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM model_configs WHERE id=? AND json_extract(document,'$.enabled')=1 AND json_extract(document,'$.agent_enabled')=1 AND json_extract(document,'$.capabilities.tools')=1)")
+            .bind(&content.model_id).fetch_one(&self.pool).await?;
         if !model_exists {
             return Err(Error::Invalid("请选择可供专家使用的本地模型"));
         }
         for reference in &content.skill_refs {
-            self.skill_version(account, &reference.skill_id, &reference.version)
+            self.skill_version(&reference.skill_id, &reference.version)
                 .await?;
         }
         for reference in &content.workflow_refs {
-            self.workflow_version(account, &reference.workflow_id, Some(reference.version_id))
+            self.workflow_version(&reference.workflow_id, Some(&reference.version_id))
                 .await?;
         }
         if !content.avatar_asset_id.is_empty() {
-            let asset = self.get_asset(account, &content.avatar_asset_id).await?;
+            let asset = self.get_asset(&content.avatar_asset_id).await?;
             if !asset.versions.iter().any(|version| {
                 version.id == content.avatar_version_id && version.mime_type.starts_with("image/")
             }) {
@@ -513,75 +408,65 @@ impl Store {
         let fields = document
             .as_object_mut()
             .ok_or(Error::State("专家内容格式无效"))?;
-        fields.extend(json!({ "id": id, "account_id": account, "version": version, "enabled": enabled, "source": "user",
-            "available": enabled, "published": false, "published_version": "", "market_locked": false, "market_lock_reason": "",
+        fields.extend(json!({ "id": id, "version": version, "enabled": enabled, "source": "user",
+            "available": enabled,
             "created_at": previous.as_ref().map(|item| item["created_at"].clone()).unwrap_or_else(|| json!(now)), "updated_at": now,
         }).as_object().ok_or(Error::State("专家记录格式无效"))?.clone());
         let mut snapshot = document.clone();
         snapshot["expert_id"] = json!(id);
         snapshot["created_at"] = json!(now);
         snapshot["notes"] = json!(notes);
-        snapshot["created_by"] = json!(account);
-        snapshot["created_by_type"] = json!("studio_user");
         let mut transaction = self.pool.begin().await?;
         if let Some(previous) = &previous {
-            let changed = sqlx::query("UPDATE experts SET document=? WHERE account_id=? AND id=? AND json_extract(document,'$.updated_at')=?")
-                .bind(document.to_string()).bind(account).bind(&id).bind(text(previous, "updated_at")?).execute(&mut *transaction).await?;
+            let changed = sqlx::query("UPDATE experts SET document=? WHERE id=? AND json_extract(document,'$.updated_at')=?")
+                .bind(document.to_string()).bind(&id).bind(text(previous, "updated_at")?).execute(&mut *transaction).await?;
             if changed.rows_affected() != 1 {
                 return Err(Error::Invalid("专家已更新，请重新读取"));
             }
         } else {
-            sqlx::query("INSERT INTO experts(account_id,id,source,document) VALUES(?,?,'user',?)")
-                .bind(account)
+            sqlx::query("INSERT INTO experts(id,source,document) VALUES(?,'user',?)")
                 .bind(&id)
                 .bind(document.to_string())
                 .execute(&mut *transaction)
                 .await?;
         }
-        sqlx::query("INSERT INTO expert_versions(account_id,expert_id,version,document,content_digest) VALUES(?,?,?,?,?)")
-            .bind(account).bind(&id).bind(version).bind(snapshot.to_string()).bind(digest(&serde_json::to_vec(&content)?))
+        sqlx::query("INSERT INTO expert_versions(expert_id,version,document,content_digest) VALUES(?,?,?,?)")
+            .bind(&id).bind(version).bind(snapshot.to_string()).bind(digest(&serde_json::to_vec(&content)?))
             .execute(&mut *transaction).await?;
         transaction.commit().await?;
-        self.get_expert(account, &id).await
+        self.get_expert(&id).await
     }
 
     pub(crate) async fn set_expert_enabled(
         &self,
-        account: &str,
         id: &str,
         enabled: bool,
     ) -> Result<Value> {
-        let mut document = self.get_expert(account, id).await?;
-        if document["source"] != "user" {
-            return Err(Error::Invalid("官方专家版本只允许读取"));
-        }
+        let mut document = self.get_expert(id).await?;
         let previous_updated_at = text(&document, "updated_at")?.to_owned();
         document["enabled"] = json!(enabled);
         document["available"] = json!(enabled);
         document["updated_at"] = json!(timestamp()?);
-        let changed = sqlx::query("UPDATE experts SET document=? WHERE account_id=? AND id=? AND json_extract(document,'$.updated_at')=?")
-            .bind(document.to_string()).bind(account).bind(id).bind(previous_updated_at).execute(&self.pool).await?;
+        let changed = sqlx::query("UPDATE experts SET document=? WHERE id=? AND json_extract(document,'$.updated_at')=?")
+            .bind(document.to_string()).bind(id).bind(previous_updated_at).execute(&self.pool).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::Invalid("专家已更新，请重新读取"));
         }
-        self.get_expert(account, id).await
+        self.get_expert(id).await
     }
 
     pub(crate) async fn resolve_expert(
         &self,
-        account: &str,
         session: &str,
         input: &Value,
     ) -> Result<Option<Value>> {
         if !session.is_empty() {
-            self.get_session(account, session).await?;
-            let saved: Option<String> = sqlx::query_scalar(
-                "SELECT expert_snapshot FROM sessions WHERE account_id=? AND id=?",
-            )
-            .bind(account)
-            .bind(session)
-            .fetch_one(&self.pool)
-            .await?;
+            self.get_session(session).await?;
+            let saved: Option<String> =
+                sqlx::query_scalar("SELECT expert_snapshot FROM sessions WHERE id=?")
+                    .bind(session)
+                    .fetch_one(&self.pool)
+                    .await?;
             if let Some(saved) = saved {
                 let snapshot: Value = serde_json::from_str(&saved)?;
                 for field in ["id", "version"] {
@@ -597,10 +482,8 @@ impl Store {
                         return Err(Error::Invalid("当前会话不能更换专家或版本"));
                     }
                 }
-                let current = self.get_expert(account, text(&snapshot, "id")?).await?;
-                if current["enabled"] != true
-                    || (current["source"] == "official" && current["available"] == false)
-                {
+                let current = self.get_expert(text(&snapshot, "id")?).await?;
+                if current["enabled"] != true || self.expert_unavailable_reason(&snapshot).await?.is_some() {
                     return Err(Error::Invalid("当前专家已停用或不可用"));
                 }
                 return Ok(Some(snapshot));
@@ -613,26 +496,17 @@ impl Store {
         let Some(id) = input["expert_id"].as_str().filter(|id| !id.is_empty()) else {
             return Ok(None);
         };
-        let current = self.get_expert(account, id).await?;
-        if current["enabled"] != true
-            || (current["source"] == "official" && current["available"] == false)
-        {
+        let current = self.get_expert(id).await?;
+        if current["enabled"] != true {
             return Err(Error::Invalid("当前专家已停用或不可用"));
         }
         let version = input["expert_version"]
             .as_str()
             .filter(|version| !version.is_empty())
             .unwrap_or(text(&current, "version")?);
-        let mut snapshot = self.expert_version(account, id, version).await?;
-        if snapshot["source"] == "official" {
-            let model = sqlx::query("SELECT id,document,credential_ref FROM model_configs WHERE account_id=? AND json_extract(document,'$.default')=1 AND json_extract(document,'$.enabled')=1 AND json_extract(document,'$.agent_enabled')=1")
-                .bind(account).fetch_optional(&self.pool).await?;
-            let model = model.ok_or(Error::Invalid("请选择官方专家使用的本地默认模型"))?;
-            snapshot["runtime_model_id"] = json!(model.get::<String, _>("id"));
-            snapshot["runtime_model_snapshot"] = json!({
-                "configuration": serde_json::from_str::<Value>(model.get("document"))?,
-                "credential_ref": model.get::<Option<String>, _>("credential_ref"),
-            });
+        let snapshot = self.expert_version(id, version).await?;
+        if self.expert_unavailable_reason(&snapshot).await?.is_some() {
+            return Err(Error::Invalid("当前专家已停用或不可用"));
         }
         Ok(Some(snapshot))
     }

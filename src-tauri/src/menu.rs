@@ -8,6 +8,7 @@ pub(crate) fn build(app: &tauri::AppHandle) -> tauri::Result<Menu<tauri::Wry>> {
         .text("settings.models", "配置模型")
         .text("settings.skills", "管理技能")
         .text("settings.mcp", "配置 MCP")
+        .text("settings.compute-nodes", "计算节点")
         .separator()
         .quit_with_text("退出 Pixoma Studio")
         .build()?;
@@ -28,6 +29,7 @@ pub(crate) fn on_event(app: &tauri::AppHandle, event: tauri::menu::MenuEvent) {
         "settings.models" => "models",
         "settings.skills" => "skills",
         "settings.mcp" => "mcp",
+        "settings.compute-nodes" => "compute-nodes",
         _ => return,
     };
     app.emit("studio:navigate", section)

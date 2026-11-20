@@ -246,6 +246,11 @@ export function StudioComposer({
         return true
       },
       handleKeyDown: (view, event) => {
+        if ((event.ctrlKey || event.metaKey) && !event.altKey && !event.shiftKey && event.key.toLowerCase() === 'a') {
+          const { doc } = view.state
+          view.dispatch(view.state.tr.setSelection(TextSelection.between(doc.resolve(0), doc.resolve(doc.content.size))))
+          return true
+        }
         const selection = view.state.selection
         if (selection instanceof NodeSelection && selection.node.type.name === 'studioReference') {
           const before = view.state.doc.resolve(selection.from).nodeBefore
@@ -379,9 +384,9 @@ export function StudioComposer({
   }), [editor, value])
 
   return (
-    <div className='relative w-full min-w-48 flex-1'>
+    <div className='relative w-full min-w-48 flex-1 select-none'>
       {!value.text ? (
-        <span className='pointer-events-none absolute left-3 top-2 text-sm leading-6 text-muted-foreground'>
+        <span className='pointer-events-none absolute left-3 top-2 text-sm leading-6 text-muted-foreground select-none'>
           {placeholder}
         </span>
       ) : null}

@@ -12,6 +12,25 @@ fn archive(files: &[(&str, &[u8])]) -> Result<Vec<u8>, Box<dyn std::error::Error
     Ok(output.finish()?.into_inner())
 }
 
+#[tokio::test]
+async fn video_creator_skill_installs_through_real_api() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.local-cache");
+    std::fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new().prefix("video-creator-skill-").tempdir_in(root)?;
+    let store = Store::open(&directory.path().join("studio.sqlite")).await?;
+    let api = LocalApi::new(store.clone());
+    let manifest = include_str!("../../src/features/studio/skills/pixoma-studio-video-creator/SKILL.md");
+    let package = archive(&[("SKILL.md",manifest.as_bytes())])?;
+    let mut input = Store::inspect_skill_zip(&package)?;
+    input["version"] = json!("1.0.0");
+    input["enabled"] = json!(true);
+    let created = request(&api,"POST","/api/v1/studio/skills",input).await?;
+    assert_eq!(created["name"],"pixoma-studio-video-creator");
+    assert_eq!(created["prompt"],manifest);
+    store.close().await;
+    Ok(())
+}
+
 #[test]
 fn skill_import_reads_real_zip_files_and_rejects_unsafe_entries()
 -> Result<(), Box<dyn std::error::Error>> {
@@ -51,13 +70,11 @@ fn skill_import_reads_real_zip_files_and_rejects_unsafe_entries()
 
 async fn request(
     api: &LocalApi,
-    account: &str,
     method: &str,
     path: &str,
     body: Value,
 ) -> pixoma_studio::Result<Value> {
     api.request(
-        account,
         LocalRequest {
             method: method.to_owned(),
             path: path.to_owned(),
@@ -77,6 +94,15 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
         .tempdir_in(root)?;
     let database = directory.path().join("studio.sqlite");
     let store = Store::open(&database).await?;
+    let connection = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display())).await?;
+    for table in ["skills", "skill_versions"] {
+        let columns: Vec<String> = sqlx::query_scalar("SELECT name FROM pragma_table_info(?)")
+            .bind(table)
+            .fetch_all(&connection)
+            .await?;
+        assert!(!columns.iter().any(|column| column == "account_id"));
+    }
+    connection.close().await;
     let api = LocalApi::new(store.clone());
     let manifest = "---\nname: review-document\ndescription: 检查用户文档\n---\n读取 references/rules.md，按照其中的说明检查文档。";
     let input = json!({
@@ -86,7 +112,6 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
     });
     let created = request(
         &api,
-        "account-a",
         "POST",
         "/api/v1/studio/skills",
         input.clone(),
@@ -96,33 +121,9 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
     let path = format!("/api/v1/studio/skills/{id}");
     assert_eq!(created["prompt"], manifest);
     assert_eq!(created["source"], "user");
-    assert!(!created["published"].as_bool().ok_or("发布状态缺失")?);
     assert_eq!(
         request(
             &api,
-            "account-a",
-            "GET",
-            &format!("{path}/publications"),
-            Value::Null
-        )
-        .await?,
-        json!([])
-    );
-    assert!(
-        request(
-            &api,
-            "account-b",
-            "GET",
-            &format!("{path}/publications"),
-            Value::Null
-        )
-        .await
-        .is_err()
-    );
-    assert_eq!(
-        request(
-            &api,
-            "account-a",
             "GET",
             "/api/v1/studio/skills",
             Value::Null
@@ -134,24 +135,28 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
         1
     );
     assert!(
-        request(&api, "account-b", "GET", &path, Value::Null)
-            .await
-            .is_err()
+        request(
+            &api,
+            "GET",
+            "/api/v1/studio/skills/missing-skill",
+            Value::Null
+        )
+        .await
+        .is_err()
     );
     let mut changed = input.clone();
     changed["version"] = json!("1.1.0");
     changed["updated_at"] = created["updated_at"].clone();
     changed["files"][1]["content"] = json!("保留编号 PX84027。");
-    let updated = request(&api, "account-a", "PATCH", &path, changed.clone()).await?;
+    let updated = request(&api, "PATCH", &path, changed.clone()).await?;
     assert_eq!(updated["version"], "1.1.0");
     assert!(
-        request(&api, "account-a", "PATCH", &path, changed)
+        request(&api, "PATCH", &path, changed)
             .await
             .is_err()
     );
     let original = request(
         &api,
-        "account-a",
         "GET",
         &format!("{path}/versions/1.0.0"),
         Value::Null,
@@ -160,7 +165,6 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
     assert_eq!(original["files"][1]["content"], "保留编号 PX73916。");
     let versions = request(
         &api,
-        "account-a",
         "GET",
         &format!("{path}/versions"),
         Value::Null,
@@ -180,7 +184,6 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
         assert!(
             request(
                 &api,
-                "account-a",
                 "POST",
                 "/api/v1/studio/skills",
                 unsafe_input
@@ -196,14 +199,14 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
         .ok_or("文件列表缺失")?
         .push(json!({ "path": "references", "content": "文件与目录冲突" }));
     assert!(
-        request(&api, "account-a", "POST", "/api/v1/studio/skills", conflict)
+        request(&api, "POST", "/api/v1/studio/skills", conflict)
             .await
             .is_err()
     );
     let mut mismatch = input.clone();
     mismatch["name"] = json!("other-name");
     assert!(
-        request(&api, "account-a", "POST", "/api/v1/studio/skills", mismatch)
+        request(&api, "POST", "/api/v1/studio/skills", mismatch)
             .await
             .is_err()
     );
@@ -211,7 +214,7 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
         let mut invalid = input.clone();
         invalid[field] = json!(3);
         assert!(
-            request(&api, "account-a", "POST", "/api/v1/studio/skills", invalid)
+            request(&api, "POST", "/api/v1/studio/skills", invalid)
                 .await
                 .is_err(),
             "字段类型应被拒绝：{field}"
@@ -219,7 +222,6 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
     }
     let disabled = request(
         &api,
-        "account-a",
         "PATCH",
         &format!("{path}/enabled"),
         json!({ "enabled": false }),
@@ -230,20 +232,12 @@ async fn personal_skills_keep_immutable_versions_and_validate_package_paths()
     drop(api);
     let reopened = Store::open(&database).await?;
     let api = LocalApi::new(reopened.clone());
-    let saved = request(&api, "account-a", "GET", &path, Value::Null).await?;
+    let saved = request(&api, "GET", &path, Value::Null).await?;
     assert_eq!(saved["version"], "1.1.0");
     assert_eq!(saved["enabled"], false);
     assert_eq!(saved["files"][1]["content"], "保留编号 PX84027。");
     reopened.close().await;
     Ok(())
-}
-
-struct TestCredential(keyring::Entry);
-
-impl Drop for TestCredential {
-    fn drop(&mut self) {
-        self.0.delete_credential().expect("删除测试模型凭据失败");
-    }
 }
 
 #[tokio::test]
@@ -259,25 +253,14 @@ async fn real_model_uses_the_skill_version_saved_when_the_run_was_created()
     let database = directory.path().join("studio.sqlite");
     let mut store = Store::open(&database).await?;
     let api = LocalApi::new(store.clone());
-    let account = "skill-binding";
     let model = request(
         &api,
-        account,
         "POST",
         "/api/v1/studio-operations/models",
         configuration,
     )
     .await?;
     let model_id = model["id"].as_str().ok_or("模型标识缺失")?;
-    let connection = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display())).await?;
-    let reference: String =
-        sqlx::query_scalar("SELECT credential_ref FROM model_configs WHERE account_id=? AND id=?")
-            .bind(account)
-            .bind(model_id)
-            .fetch_one(&connection)
-            .await?;
-    let _credential = TestCredential(keyring::Entry::new("com.pixoma.studio", &reference)?);
-    connection.close().await;
     let expected = uuid::Uuid::new_v4().to_string();
     let replacement = uuid::Uuid::new_v4().to_string();
     let original_content = format!(
@@ -307,25 +290,23 @@ async fn real_model_uses_the_skill_version_saved_when_the_run_was_created()
         .collect::<Result<_, _>>()?;
     let created = request(
         &api,
-        account,
         "POST",
         "/api/v1/studio/skills",
         skill.clone(),
     )
     .await?;
     let skill_id = created["id"].as_str().ok_or("技能标识缺失")?;
-    let session = store.create_session(account, "skills").await?;
+    let session = store.create_session("skills").await?;
     let input = json!({
         "session_id": session.id, "request_id": "skill-binding", "model_config_id": model_id,
         "text": format!("请调用 load_skill，以 path 为 . 完整读取技能 {skill_id} 文件目录的全部分页，再读取 references/code.md 的全部内容，按照所选技能提供审核编号。必须实际调用工具并继续读取所有 next。"), "permission_mode": "auto_approve", "skill_ids": [skill_id],
     });
-    let queued = store.submit_message(account, input.clone()).await?;
+    let queued = store.submit_message(input.clone()).await?;
     let run_id = queued["run"]["id"].as_str().ok_or("运行标识缺失")?;
     assert_eq!(queued["message"]["parts"][0]["version"], "1.0.0");
     let connection = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display())).await?;
     let context: String =
-        sqlx::query_scalar("SELECT context_snapshot FROM runs WHERE account_id=? AND id=?")
-            .bind(account)
+        sqlx::query_scalar("SELECT context_snapshot FROM runs WHERE id=?")
             .bind(run_id)
             .fetch_one(&connection)
             .await?;
@@ -339,7 +320,6 @@ async fn real_model_uses_the_skill_version_saved_when_the_run_was_created()
     skill["files"][1]["content"] = json!(replacement);
     request(
         &api,
-        account,
         "PATCH",
         &format!("/api/v1/studio/skills/{skill_id}"),
         skill,
@@ -347,29 +327,28 @@ async fn real_model_uses_the_skill_version_saved_when_the_run_was_created()
     .await?;
     request(
         &api,
-        account,
         "PATCH",
         &format!("/api/v1/studio/skills/{skill_id}/enabled"),
         json!({ "enabled": false }),
     )
     .await?;
     assert_eq!(
-        store.submit_message(account, input).await?["run"]["id"],
+        store.submit_message(input).await?["run"]["id"],
         run_id
     );
     let denied = json!({
         "session_id": session.id, "request_id": "disabled-skill", "model_config_id": model_id,
         "text": "读取编号", "permission_mode": "auto_approve", "skill_ids": [skill_id],
     });
-    assert!(store.submit_message(account, denied).await.is_err());
+    assert!(store.submit_message(denied).await.is_err());
     drop(api);
     store.close().await;
     store = Store::open(&database).await?;
     let result = pixoma_studio::AgentRuntime::new(store.clone())
-        .execute(account, run_id)
+        .execute(run_id)
         .await?;
     assert_eq!(result["status"], "succeeded", "{}", result["error_message"]);
-    let events = store.run_events_after(account, run_id, 0).await?;
+    let events = store.run_events_after(run_id, 0).await?;
     assert!(
         events.iter().any(|event| event["type"] == "TOOL_CALL_START"
             && event["payload"]["toolCallName"] == "load_skill"),
@@ -395,8 +374,8 @@ async fn real_model_uses_the_skill_version_saved_when_the_run_was_created()
     );
     assert!(!output.contains(&replacement));
     let connection = sqlx::SqlitePool::connect(&format!("sqlite://{}", database.display())).await?;
-    let results: Vec<String> = sqlx::query_scalar("SELECT result FROM tool_calls WHERE account_id=? AND run_id=? AND status='succeeded' ORDER BY turn,part")
-        .bind(account).bind(run_id).fetch_all(&connection).await?;
+    let results: Vec<String> = sqlx::query_scalar("SELECT result FROM tool_calls WHERE run_id=? AND status='succeeded' ORDER BY turn,part")
+        .bind(run_id).fetch_all(&connection).await?;
     connection.close().await;
     let mut pages = std::collections::BTreeMap::new();
     let mut directories = std::collections::BTreeMap::new();

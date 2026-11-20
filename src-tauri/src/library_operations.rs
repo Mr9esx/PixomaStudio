@@ -16,10 +16,10 @@ pub(crate) struct LibraryBatch {
 }
 
 impl Store {
-    pub(crate) async fn library_projects(&self, account: &str) -> Result<Value> {
-        let projects = self.list_projects(account).await?;
-        let counts: Vec<(String, i64)> = sqlx::query_as("SELECT coalesce(project_id,''),count(*) FROM project_assets WHERE account_id=? AND archived_at IS NULL GROUP BY project_id")
-            .bind(account).fetch_all(&self.pool).await?;
+    pub(crate) async fn library_projects(&self) -> Result<Value> {
+        let projects = self.list_projects().await?;
+        let counts: Vec<(String, i64)> = sqlx::query_as("SELECT coalesce(project_id,''),count(*) FROM project_assets WHERE archived_at IS NULL GROUP BY project_id")
+            .fetch_all(&self.pool).await?;
         let count = |id: &str| {
             counts
                 .iter()
@@ -32,102 +32,87 @@ impl Store {
         Ok(json!(items))
     }
 
-    pub(crate) async fn library_formats(&self, account: &str, project: &str) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn library_formats(&self, project: &str) -> Result<Value> {
         if !project.is_empty() {
-            self.get_project(account, project).await?;
+            self.get_project(project).await?;
         }
-        let formats: Vec<String> = sqlx::query_scalar("SELECT DISTINCT v.format FROM project_assets p JOIN asset_versions v ON v.id=p.asset_version_id AND v.account_id=p.account_id WHERE p.account_id=? AND coalesce(p.project_id,'')=? AND p.archived_at IS NULL ORDER BY v.format")
-            .bind(account).bind(project).fetch_all(&self.pool).await?;
+        let formats: Vec<String> = sqlx::query_scalar("SELECT DISTINCT v.format FROM project_assets p JOIN asset_versions v ON v.id=p.asset_version_id WHERE coalesce(p.project_id,'')=? AND p.archived_at IS NULL ORDER BY v.format")
+            .bind(project).fetch_all(&self.pool).await?;
         Ok(json!(formats))
     }
 
-    pub(crate) async fn set_project_asset_version(
-        &self,
-        account: &str,
-        id: &str,
-        version: &str,
-    ) -> Result<Value> {
-        let existing = self.project_asset(account, id).await?;
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM asset_versions WHERE account_id=? AND asset_id=? AND id=?",
-        )
-        .bind(account)
-        .bind(text(&existing, "asset_id")?)
-        .bind(version)
-        .fetch_one(&self.pool)
-        .await?;
+    pub(crate) async fn set_project_asset_version(&self, id: &str, version: &str) -> Result<Value> {
+        let existing = self.project_asset(id).await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM asset_versions WHERE asset_id=? AND id=?")
+                .bind(text(&existing, "asset_id")?)
+                .bind(version)
+                .fetch_one(&self.pool)
+                .await?;
         if count != 1 {
             return Err(Error::NotFound);
         }
-        sqlx::query(
-            "UPDATE project_assets SET asset_version_id=?,updated_at=? WHERE account_id=? AND id=?",
-        )
-        .bind(version)
-        .bind(timestamp()?)
-        .bind(account)
-        .bind(id)
-        .execute(&self.pool)
-        .await?;
-        self.project_asset(account, id).await
+        sqlx::query("UPDATE project_assets SET asset_version_id=?,updated_at=? WHERE id=?")
+            .bind(version)
+            .bind(timestamp()?)
+            .bind(id)
+            .execute(&self.pool)
+            .await?;
+        self.project_asset(id).await
     }
 
     pub(crate) async fn copy_project_asset(
         &self,
-        account: &str,
         source: &str,
         project: &str,
         version: Option<&str>,
     ) -> Result<Value> {
-        let source = self.project_asset(account, source).await?;
+        let source = self.project_asset(source).await?;
         let source_project = text(&source, "project_id")?;
         if source_project == project {
             return Err(Error::Invalid("请选择其他项目"));
         }
         if !project.is_empty() {
-            self.get_project(account, project).await?;
+            self.get_project(project).await?;
         }
         let version = version.unwrap_or(text(&source, "asset_version_id")?);
-        let count: i64 = sqlx::query_scalar(
-            "SELECT count(*) FROM asset_versions WHERE account_id=? AND asset_id=? AND id=?",
-        )
-        .bind(account)
-        .bind(text(&source, "asset_id")?)
-        .bind(version)
-        .fetch_one(&self.pool)
-        .await?;
+        let count: i64 =
+            sqlx::query_scalar("SELECT count(*) FROM asset_versions WHERE asset_id=? AND id=?")
+                .bind(text(&source, "asset_id")?)
+                .bind(version)
+                .fetch_one(&self.pool)
+                .await?;
         if count != 1 {
             return Err(Error::NotFound);
         }
         let name = if source_project.is_empty() {
             String::new()
         } else {
-            self.get_project(account, source_project).await?.name
+            self.get_project(source_project).await?.name
         };
         let origin = json!({ "project_id": source_project, "project_asset_id": source["id"], "project_name_snapshot": name, "display_name": source["display_name"], "deleted": false });
         let id = Uuid::new_v4().to_string();
         let now = timestamp()?;
-        sqlx::query("INSERT INTO project_assets(id,account_id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at,copy_source) VALUES(?,?,?,?,?,?,?,?,?)")
-            .bind(&id).bind(account).bind(if project.is_empty() { None } else { Some(project) })
+        sqlx::query("INSERT INTO project_assets(id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at,copy_source) VALUES(?,?,?,?,?,?,?,?)")
+            .bind(&id).bind(if project.is_empty() { None } else { Some(project) })
             .bind(text(&source, "asset_id")?).bind(version).bind(text(&source, "display_name")?)
             .bind(&now).bind(&now).bind(origin.to_string()).execute(&self.pool).await?;
-        self.project_asset(account, &id).await
+        self.project_asset(&id).await
     }
 
-    pub(crate) async fn project_asset_duplicates(&self, account: &str, id: &str) -> Result<Value> {
-        let source = self.project_asset(account, id).await?;
-        let ids: Vec<String> = sqlx::query_scalar("SELECT p.id FROM project_assets p JOIN asset_versions v ON v.id=p.asset_version_id AND v.account_id=p.account_id LEFT JOIN projects pr ON pr.id=p.project_id AND pr.account_id=p.account_id WHERE p.account_id=? AND p.asset_id<>? AND v.digest=(SELECT digest FROM asset_versions WHERE account_id=? AND id=?) ORDER BY (coalesce(p.project_id,'')=?) DESC,coalesce(pr.name,''),p.id")
-            .bind(account).bind(text(&source, "asset_id")?).bind(account).bind(text(&source, "asset_version_id")?)
+    pub(crate) async fn project_asset_duplicates(&self, id: &str) -> Result<Value> {
+        let source = self.project_asset(id).await?;
+        let ids: Vec<String> = sqlx::query_scalar("SELECT p.id FROM project_assets p JOIN asset_versions v ON v.id=p.asset_version_id LEFT JOIN projects pr ON pr.id=p.project_id WHERE p.asset_id<>? AND v.digest=(SELECT digest FROM asset_versions WHERE id=?) ORDER BY (coalesce(p.project_id,'')=?) DESC,coalesce(pr.name,''),p.id")
+            .bind(text(&source, "asset_id")?).bind(text(&source, "asset_version_id")?)
             .bind(text(&source, "project_id")?).fetch_all(&self.pool).await?;
         let mut items = Vec::with_capacity(ids.len());
         for id in ids {
-            items.push(self.project_asset(account, &id).await?);
+            items.push(self.project_asset(&id).await?);
         }
         Ok(json!({ "items": items }))
     }
 
-    pub(crate) async fn library_batch(&self, account: &str, batch: LibraryBatch) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn library_batch(&self, batch: LibraryBatch) -> Result<Value> {
         if batch.project_asset_ids.is_empty() || batch.project_asset_ids.len() > 100 {
             return Err(Error::Invalid("请选择 1 至 100 项资产"));
         }
@@ -156,12 +141,9 @@ impl Store {
         let mut results = Vec::with_capacity(batch.project_asset_ids.len());
         for id in &batch.project_asset_ids {
             let result = match batch.action.as_str() {
-                "category" | "rating" | "archive" => {
-                    self.patch_project_asset(account, id, &patch).await
-                }
+                "category" | "rating" | "archive" => self.patch_project_asset(id, &patch).await,
                 "project" => {
                     self.copy_project_asset(
-                        account,
                         id,
                         batch
                             .project_id
@@ -173,7 +155,6 @@ impl Store {
                 }
                 _ => {
                     self.batch_tags(
-                        account,
                         id,
                         batch
                             .tag_ids
@@ -194,14 +175,8 @@ impl Store {
         Ok(json!({ "results": results }))
     }
 
-    async fn batch_tags(
-        &self,
-        account: &str,
-        id: &str,
-        selected: &[String],
-        remove: bool,
-    ) -> Result<Value> {
-        let existing = self.project_asset(account, id).await?;
+    async fn batch_tags(&self, id: &str, selected: &[String], remove: bool) -> Result<Value> {
+        let existing = self.project_asset(id).await?;
         let mut tags = existing["tags"]
             .as_array()
             .ok_or(Error::State("资产标签列表无效"))?
@@ -217,6 +192,6 @@ impl Store {
                 }
             }
         }
-        self.set_project_asset_tags(account, id, &tags).await
+        self.set_project_asset_tags(id, &tags).await
     }
 }

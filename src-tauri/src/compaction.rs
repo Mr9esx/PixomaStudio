@@ -106,7 +106,6 @@ fn history_source(messages: &[Message]) -> Result<String> {
 
 struct ContextCompressor<'a> {
     store: &'a Store,
-    account: &'a str,
     run: &'a str,
     session: &'a str,
     turn: usize,
@@ -130,13 +129,13 @@ impl ContextCompressor<'_> {
     }
 
     async fn cached_summary(&self, key: &str) -> Result<Option<String>> {
-        Ok(sqlx::query_scalar("SELECT summary FROM context_compactions WHERE account_id=? AND session_id=? AND source_key=?")
-            .bind(self.account).bind(self.session).bind(key).fetch_optional(&self.store.pool).await?)
+        Ok(sqlx::query_scalar("SELECT summary FROM context_compactions WHERE session_id=? AND source_key=?")
+            .bind(self.session).bind(key).fetch_optional(&self.store.pool).await?)
     }
 
     async fn save_summary(&self, key: &str, summary: &str) -> Result<()> {
-        sqlx::query("INSERT INTO context_compactions(account_id,session_id,source_key,summary,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING")
-            .bind(self.account).bind(self.session).bind(key).bind(summary).bind(timestamp()?)
+        sqlx::query("INSERT INTO context_compactions(session_id,source_key,summary,created_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+            .bind(self.session).bind(key).bind(summary).bind(timestamp()?)
             .execute(&self.store.pool).await?;
         Ok(())
     }
@@ -159,16 +158,15 @@ impl ContextCompressor<'_> {
         });
         let mut transaction = self.store.pool.begin().await?;
         if let Some(summary) = summary {
-            sqlx::query("INSERT INTO context_compactions(account_id,session_id,source_key,summary,created_at) VALUES(?,?,?,?,?) ON CONFLICT DO NOTHING")
-                .bind(self.account).bind(self.session).bind(source).bind(summary).bind(&now)
+            sqlx::query("INSERT INTO context_compactions(session_id,source_key,summary,created_at) VALUES(?,?,?,?) ON CONFLICT DO NOTHING")
+                .bind(self.session).bind(source).bind(summary).bind(&now)
                 .execute(&mut *transaction).await?;
         }
-        sqlx::query("INSERT INTO context_events(id,account_id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?,?)")
-            .bind(id).bind(self.account).bind(self.session).bind(self.run).bind(now).bind(event.to_string())
+        sqlx::query("INSERT INTO context_events(id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?)")
+            .bind(id).bind(self.session).bind(self.run).bind(now).bind(event.to_string())
             .execute(&mut *transaction).await?;
         Store::append_event_in(
             &mut transaction,
-            self.account,
             self.session,
             self.run,
             json!({ "type": "CUSTOM", "name": kind, "value": event }),
@@ -203,7 +201,6 @@ impl ContextCompressor<'_> {
         let attempt = self
             .store
             .begin_model_request(
-                self.account,
                 self.run,
                 self.turn,
                 self.configuration,
@@ -213,7 +210,7 @@ impl ContextCompressor<'_> {
             .await?;
         let response = self.model.call(request).await?;
         self.store
-            .finish_model_request(self.account, &attempt, &response)
+            .finish_model_request(&attempt, &response)
             .await?;
         if !matches!(response.finish_reason(), Some(FinishReason::Stop))
             || response
@@ -378,20 +375,18 @@ impl ContextCompressor<'_> {
 impl Store {
     pub(crate) async fn project_model_context(
         &self,
-        account: &str,
         run: &str,
         turn: usize,
         configuration: &ModelInput,
         model: &DynModel<Completion>,
         request: CompletionRequest,
     ) -> Result<CompletionRequest> {
-        let record = self.get_run(account, run).await?;
-        let turn_number = sqlx::query_scalar("SELECT count(*) FROM runs WHERE account_id=? AND session_id=? AND (created_at<? OR (created_at=? AND id<=?))")
-            .bind(account).bind(text(&record, "session_id")?).bind(text(&record, "created_at")?)
+        let record = self.get_run(run).await?;
+        let turn_number = sqlx::query_scalar("SELECT count(*) FROM runs WHERE session_id=? AND (created_at<? OR (created_at=? AND id<=?))")
+            .bind(text(&record, "session_id")?).bind(text(&record, "created_at")?)
             .bind(text(&record, "created_at")?).bind(run).fetch_one(&self.pool).await?;
         ContextCompressor {
             store: self,
-            account,
             run,
             session: text(&record, "session_id")?,
             turn,

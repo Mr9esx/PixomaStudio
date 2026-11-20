@@ -114,11 +114,9 @@ fn input_assets(card: &Value, inputs: &Value) -> Result<Vec<Value>> {
 }
 
 impl Store {
-    async fn expert_card(&self, account: &str, id: &str) -> Result<Value> {
-        Self::check_account(account)?;
+    async fn expert_card(&self, id: &str) -> Result<Value> {
         let document: String =
-            sqlx::query_scalar("SELECT document FROM expert_cards WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT document FROM expert_cards WHERE id=?")
                 .bind(id)
                 .fetch_optional(&self.pool)
                 .await?
@@ -128,12 +126,11 @@ impl Store {
 
     pub(crate) async fn create_expert_card(
         &self,
-        account: &str,
         run: &Value,
         call_id: &str,
         input: &Value,
     ) -> Result<Value> {
-        let mut task = self.current_expert_task(account, run).await?;
+        let mut task = self.current_expert_task(run).await?;
         if ["completed", "cancelled", "failed"].contains(&text(&task, "status")?) {
             return Err(Error::Invalid("专家任务已经结束"));
         }
@@ -184,7 +181,6 @@ impl Store {
         let mut transaction = self.pool.begin().await?;
         Self::validate_expert_result_in(
             &mut transaction,
-            account,
             text(run, "session_id")?,
             &json!({ "assets": input_assets(content, &suggested)? }),
             false,
@@ -197,7 +193,6 @@ impl Store {
             }
             Self::validate_expert_result_in(
                 &mut transaction,
-                account,
                 text(run, "session_id")?,
                 content
                     .get("results")
@@ -205,12 +200,12 @@ impl Store {
                 true,
             )
             .await?;
-            Self::validate_expert_attempt_workflows_in(&mut transaction, account, attempt_id)
+            Self::validate_expert_attempt_workflows_in(&mut transaction, attempt_id)
                 .await?;
         }
         if !attempt_id.is_empty() {
             let mut attempt =
-                Self::expert_attempt_in(&mut transaction, account, attempt_id).await?;
+                Self::expert_attempt_in(&mut transaction, attempt_id).await?;
             if attempt["expert_task_id"] != task["id"]
                 || attempt["step_id"] != step_id
                 || task["steps"][index]["latest_attempt_id"] != attempt_id
@@ -218,22 +213,21 @@ impl Store {
                 return Err(Error::Invalid("步骤处理记录不匹配"));
             }
             attempt["status"] = json!("waiting_user");
-            Self::save_expert_attempt_in(&mut transaction, account, &mut attempt).await?;
+            Self::save_expert_attempt_in(&mut transaction, &mut attempt).await?;
             task["steps"][index]["status"] = json!("waiting_user");
         }
         task["status"] = json!("waiting_user");
         task["current_step_id"] = json!(step_id);
-        Self::save_expert_task_in(&mut transaction, account, run, &mut task).await?;
+        Self::save_expert_task_in(&mut transaction, run, &mut task).await?;
         let id = Uuid::new_v4().to_string();
         let now = timestamp()?;
         let card = json!({ "id": id, "session_id": run["session_id"], "run_id": run["id"], "expert_task_id": task["id"],
             "step_id": step_id, "attempt_id": attempt_id, "expert_card": content, "expected_task_revision": task["revision"],
             "status": "pending", "created_at": now, "updated_at": now });
-        sqlx::query("INSERT INTO expert_cards(id,account_id,session_id,created_at,document,tool_call_id) VALUES(?,?,?,?,?,?)")
-            .bind(&id).bind(account).bind(text(run, "session_id")?).bind(now).bind(card.to_string()).bind(call_id).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO expert_cards(id,session_id,created_at,document,tool_call_id) VALUES(?,?,?,?,?)")
+            .bind(&id).bind(text(run, "session_id")?).bind(now).bind(card.to_string()).bind(call_id).execute(&mut *transaction).await?;
         Self::append_event_in(
             &mut transaction,
-            account,
             text(run, "session_id")?,
             text(run, "id")?,
             json!({ "type": "CUSTOM", "name": "EXPERT_CARD_REQUIRED", "value": card }),
@@ -247,7 +241,6 @@ impl Store {
 
     pub async fn resolve_expert_card_response(
         &self,
-        account: &str,
         id: &str,
         input: Value,
     ) -> Result<Value> {
@@ -256,12 +249,12 @@ impl Store {
         if response.response_id.trim().is_empty() || response.response_id.len() > 256 {
             return Err(Error::Invalid("卡片响应标识无效"));
         }
-        let card = self.expert_card(account, id).await?;
+        let card = self.expert_card(id).await?;
         if card["status"] != "pending" {
             if card["response"] != serde_json::to_value(&response)? {
                 return Err(Error::Invalid("专家卡片已经收到其他答复"));
             }
-            return self.get_run(account, text(&card, "response_run_id")?).await;
+            return self.get_run(text(&card, "response_run_id")?).await;
         }
         let mode = text(&card["expert_card"], "mode")?;
         let label = match (mode, response.action.as_str()) {
@@ -276,7 +269,7 @@ impl Store {
         validate_inputs(&card["expert_card"], &inputs, response.action == "start")?;
         let session_id = text(&card, "session_id")?;
         let expert = self
-            .resolve_expert(account, session_id, &Value::Null)
+            .resolve_expert(session_id, &Value::Null)
             .await?
             .ok_or(Error::Invalid("当前会话没有绑定专家"))?;
         let content: crate::experts::ExpertContent = serde_json::from_value(expert.clone())?;
@@ -309,7 +302,7 @@ impl Store {
             message.push_str(&format!("\n{}", response.comment));
         }
         let request_id = format!("expert-card:{}", response.response_id);
-        let session = self.get_session(account, session_id).await?;
+        let session = self.get_session(session_id).await?;
         let input = json!({ "session_id": session_id, "request_id": request_id, "text": message, "permission_mode": session.permission_mode,
             "expert_id": expert["id"], "expert_version": expert["version"], "model_config_id": Self::expert_model_id(&expert)?,
             "assets": input_assets(&card["expert_card"], &inputs)?, "expert_card_response": { "card_id": id, "response": response },
@@ -321,7 +314,6 @@ impl Store {
         };
         let queued = self
             .queue_run_input(
-                account,
                 session_id,
                 &request_id,
                 Self::expert_model_id(&expert)?,
@@ -336,13 +328,11 @@ impl Store {
 
     pub(crate) async fn apply_expert_card_response_in(
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        account: &str,
         run: &Value,
         decision: &ExpertCardDecision,
     ) -> Result<()> {
         let saved: String =
-            sqlx::query_scalar("SELECT document FROM expert_cards WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT document FROM expert_cards WHERE id=?")
                 .bind(&decision.card_id)
                 .fetch_optional(&mut **transaction)
                 .await?
@@ -354,20 +344,18 @@ impl Store {
         {
             return Err(Error::Invalid("专家卡片状态已更新"));
         }
-        let mut task = Self::expert_task_in(transaction, account, &decision.task_id).await?;
+        let mut task = Self::expert_task_in(transaction, &decision.task_id).await?;
         if task["revision"] != card["expected_task_revision"]
             || task["session_id"] != run["session_id"]
             || ["completed", "cancelled", "failed"].contains(&text(&task, "status")?)
         {
             return Err(Error::Invalid("专家任务已更新，请重新确认"));
         }
-        let current: Option<String> = sqlx::query_scalar(
-            "SELECT current_expert_task_id FROM sessions WHERE account_id=? AND id=?",
-        )
-        .bind(account)
-        .bind(text(run, "session_id")?)
-        .fetch_one(&mut **transaction)
-        .await?;
+        let current: Option<String> =
+            sqlx::query_scalar("SELECT current_expert_task_id FROM sessions WHERE id=?")
+                .bind(text(run, "session_id")?)
+                .fetch_one(&mut **transaction)
+                .await?;
         if current.as_deref() != Some(decision.task_id.as_str()) {
             return Err(Error::Invalid("当前专家任务已更换"));
         }
@@ -383,7 +371,6 @@ impl Store {
         validate_inputs(&card["expert_card"], &inputs, response.action == "start")?;
         Self::validate_expert_result_in(
             transaction,
-            account,
             text(run, "session_id")?,
             &json!({ "assets": input_assets(&card["expert_card"], &inputs)? }),
             false,
@@ -394,7 +381,6 @@ impl Store {
             "start" if card["expert_card"]["mode"] == "step_entry" => {
                 let attempt = Self::start_expert_attempt_in(
                     transaction,
-                    account,
                     run,
                     &mut task,
                     &step_id,
@@ -413,7 +399,7 @@ impl Store {
                 if task["steps"][index]["latest_attempt_id"] != attempt_id {
                     return Err(Error::Invalid("结果卡片对应的处理记录已更新"));
                 }
-                let mut attempt = Self::expert_attempt_in(transaction, account, attempt_id).await?;
+                let mut attempt = Self::expert_attempt_in(transaction, attempt_id).await?;
                 if attempt["expert_task_id"] != task["id"] || attempt["step_id"] != step_id {
                     return Err(Error::Invalid("步骤处理记录不匹配"));
                 }
@@ -428,11 +414,10 @@ impl Store {
                     Value::Null
                 };
                 if response.action == "accept" {
-                    Self::validate_expert_attempt_workflows_in(transaction, account, attempt_id)
+                    Self::validate_expert_attempt_workflows_in(transaction, attempt_id)
                         .await?;
                     Self::validate_expert_result_in(
                         transaction,
-                        account,
                         text(run, "session_id")?,
                         &card["expert_card"]["results"],
                         true,
@@ -440,7 +425,7 @@ impl Store {
                     .await?;
                     attempt["result"] = card["expert_card"]["results"].clone();
                 }
-                Self::save_expert_attempt_in(transaction, account, &mut attempt).await?;
+                Self::save_expert_attempt_in(transaction, &mut attempt).await?;
                 task["steps"][index]["status"] = attempt["status"].clone();
                 task["steps"][index]["summary"] = card["expert_card"]["results"]["summary"]
                     .as_str()
@@ -449,7 +434,7 @@ impl Store {
             }
             _ => return Err(Error::Invalid("当前卡片不支持此项操作")),
         }
-        Self::save_expert_task_in(transaction, account, run, &mut task).await?;
+        Self::save_expert_task_in(transaction, run, &mut task).await?;
         card["status"] = json!("answered");
         card["response_action"] = json!(response.action);
         card["response"] = serde_json::to_value(response)?;
@@ -457,8 +442,8 @@ impl Store {
         card["response_run_id"] = run["id"].clone();
         card["response_message_id"] = run["trigger_message_id"].clone();
         card["updated_at"] = json!(timestamp()?);
-        let changed = sqlx::query("UPDATE expert_cards SET document=? WHERE account_id=? AND id=? AND json_extract(document,'$.status')='pending'")
-            .bind(card.to_string()).bind(account).bind(&decision.card_id).execute(&mut **transaction).await?;
+        let changed = sqlx::query("UPDATE expert_cards SET document=? WHERE id=? AND json_extract(document,'$.status')='pending'")
+            .bind(card.to_string()).bind(&decision.card_id).execute(&mut **transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::Invalid("专家卡片已经收到答复"));
         }
@@ -467,19 +452,17 @@ impl Store {
 
     pub(crate) async fn validate_expert_start_in(
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        account: &str,
         run: &Value,
         step_id: &str,
     ) -> Result<()> {
-        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE account_id=? AND session_id=? AND id=? AND json_extract(document,'$.role')='user')")
-            .bind(account).bind(text(run, "session_id")?).bind(text(run, "trigger_message_id")?).fetch_one(&mut **transaction).await?;
+        let exists: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM messages WHERE session_id=? AND id=? AND json_extract(document,'$.role')='user')")
+            .bind(text(run, "session_id")?).bind(text(run, "trigger_message_id")?).fetch_one(&mut **transaction).await?;
         if !exists {
             return Err(Error::Invalid("步骤授权消息无效"));
         }
         if run["trigger_kind"] == "card_response" {
             let saved: String =
-                sqlx::query_scalar("SELECT document FROM expert_cards WHERE account_id=? AND id=?")
-                    .bind(account)
+                sqlx::query_scalar("SELECT document FROM expert_cards WHERE id=?")
                     .bind(text(run, "trigger_record_id")?)
                     .fetch_one(&mut **transaction)
                     .await?;

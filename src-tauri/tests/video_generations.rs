@@ -1,0 +1,67 @@
+use pixoma_studio::Store;
+use serde_json::{Value, json};
+use std::path::PathBuf;
+
+#[tokio::test]
+async fn video_generation_snapshots_survive_shot_removal_and_submission_failure() -> Result<(), Box<dyn std::error::Error>> {
+    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../.local-cache");
+    std::fs::create_dir_all(&root)?;
+    let directory = tempfile::Builder::new().prefix("video-generations-").tempdir_in(root)?;
+    let path = directory.path().join("studio.sqlite");
+    let store = Store::open(&path).await?;
+    let mut definition: Value = serde_json::from_str(include_str!("../../docs/video-generation/h3/tea-h3-workflow.json"))?;
+    definition["execution"]["node_id"] = json!("");
+    let workflow = store.create_workflow(json!({"name":"H3 工作流","category":"video","enabled":false,"draft":definition})).await?;
+    let workflow_id = workflow["id"].as_str().ok_or("工作流标识缺失")?;
+    let version = store.create_workflow_version(workflow_id,json!({"expected_revision":1,"version":"1.0.0"})).await?;
+    let session = store.create_session("video-generation-owner").await?;
+    let sources = json!({"prompt":{"field":"storyboard","sourceText":"晨光穿过茶树","value":"清晨茶园","edited":true}});
+    let shot = json!({"id":"opening","name":"茶园晨光","script":"","storyboard":"晨光穿过茶树","references":[],"subtitle":"","duration":0,"sourceIn":0,"workflowId":workflow_id,"versionId":version["id"],"inputs":{"prompt":"清晨茶园"},"inputSources":sources});
+    let project = json!({"version":2,"name":"茶园","width":1280,"height":720,"fps":30,"shots":[shot],"audio":[]});
+    let saved = store.write_video_project(&session.id,"initial",json!({"expected_version":0,"project":project})).await?;
+    let video_id = saved["asset_id"].as_str().ok_or("作品标识缺失")?;
+    let request = json!({"request_id":"first","session_id":session.id,"shot_id":"opening","expected_version":1});
+    let unrelated = store.create_session("unrelated-video-chat").await?;
+    let mut unauthorized = request.clone(); unauthorized["session_id"] = json!(unrelated.id);
+    assert!(store.prepare_video_generation(video_id,unauthorized).await.is_err());
+    let mut stale = request.clone(); stale["expected_version"] = json!(0);
+    assert!(store.prepare_video_generation(video_id,stale).await.is_err());
+    assert_eq!(store.list_video_generations(video_id).await?,json!([]));
+    let (first,second) = tokio::join!(store.prepare_video_generation(video_id,request.clone()),store.prepare_video_generation(video_id,request.clone()));
+    let prepared = first?;
+    assert_eq!(second?["id"],prepared["id"]);
+    assert_eq!(prepared["snapshot"]["inputs"]["prompt"],"清晨茶园");
+    assert_eq!(prepared["snapshot"]["inputs"]["width"],608);
+    assert_eq!(prepared["snapshot"]["shot"]["inputSources"],sources);
+    assert_eq!(prepared["status"],"submitting");
+    assert_eq!(store.prepare_video_generation(video_id,request.clone()).await?["id"],prepared["id"]);
+    let mut duplicate = request.clone(); duplicate["request_id"] = json!("another-active");
+    assert!(store.prepare_video_generation(video_id,duplicate).await.is_err());
+    let mut edited = project.clone();
+    edited["shots"][0]["storyboard"] = json!("人物离开茶园");
+    edited["shots"][0]["inputs"]["prompt"] = json!("傍晚茶园");
+    edited["shots"][0]["inputSources"]["prompt"]["sourceText"] = json!("人物离开茶园");
+    store.write_video_work(video_id,&session.id,"change-source",json!({"expected_version":1,"project":edited})).await?;
+    assert_eq!(store.get_video_generation(video_id,"first").await?["snapshot"]["shot"]["inputSources"],sources);
+    edited["shots"] = json!([]);
+    store.write_video_work(video_id,&session.id,"remove-shot",json!({"expected_version":2,"project":edited})).await?;
+    store.close().await;
+    let store = Store::open(&path).await?;
+    store.resume_video_generations().await?;
+    let result = store.get_video_generation(video_id,"first").await?;
+    assert_eq!(result["status"],"submission_failed");
+    assert!(result["submission_error"].as_str().is_some_and(|message|message.contains("停用")));
+    assert_eq!(result["snapshot"],prepared["snapshot"]);
+    assert_eq!(store.create_video_generation(video_id,request).await?["snapshot"],prepared["snapshot"]);
+    let retried = store.retry_video_generation(video_id,"first",json!({"request_id":"retry","session_id":session.id})).await?;
+    assert_eq!(retried["retry_of"],"first");
+    assert_eq!(retried["snapshot"],prepared["snapshot"]);
+    assert_eq!(retried["status"],"submission_failed");
+    assert_eq!(store.read_video_work(video_id).await?["project"]["shots"],json!([]));
+    store.clear_sessions().await?;
+    let records = store.list_video_generations(video_id).await?;
+    assert_eq!(records.as_array().ok_or("生成记录缺失")?.len(),2);
+    assert!(records.as_array().ok_or("生成记录缺失")?.iter().all(|record|record["session_id"].is_null() && record["snapshot"] == prepared["snapshot"]));
+    store.close().await;
+    Ok(())
+}

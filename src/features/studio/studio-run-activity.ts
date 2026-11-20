@@ -44,7 +44,6 @@ export function nextStudioActivity(
         return '正在更新资产'
       case 'load_skill':
         return '正在读取技能'
-      case 'edit_session_flow':
         return '正在编辑流程'
       default:
         return '正在调用工具'

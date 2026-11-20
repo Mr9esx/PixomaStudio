@@ -1,7 +1,7 @@
-use crate::{Error, Result, Store, assets::AssetCreation, local_api::text};
+use crate::{Error, Result, Store, assets::{AssetContent, AssetCreation}, local_api::text};
 use serde::Deserialize;
 use serde_json::Value;
-use std::io::{Cursor, Write};
+use std::{fs::File, io::{self, Cursor, Seek}, path::Path};
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -22,7 +22,18 @@ enum UploadPurpose {
 
 pub struct AssetExport {
     pub name: String,
-    pub bytes: Vec<u8>,
+    pub file: File,
+}
+
+impl AssetExport {
+    pub fn save_to(mut self, destination: &Path) -> Result<()> {
+        let parent = destination.parent().ok_or(Error::Invalid("保存位置无效"))?;
+        let mut output = tempfile::NamedTempFile::new_in(parent)?;
+        io::copy(&mut self.file, &mut output)?;
+        output.as_file().sync_all()?;
+        output.persist(destination).map_err(|error| Error::Io(error.error))?;
+        Ok(())
+    }
 }
 
 fn filename(name: &str) -> Result<String> {
@@ -48,12 +59,7 @@ fn filename(name: &str) -> Result<String> {
 }
 
 impl Store {
-    pub async fn upload_asset(
-        &self,
-        account: &str,
-        metadata: Value,
-        bytes: &[u8],
-    ) -> Result<Value> {
+    pub async fn upload_asset(&self, metadata: Value, bytes: &[u8]) -> Result<Value> {
         let metadata: UploadMetadata = serde_json::from_value(metadata)?;
         let name = filename(&metadata.file_name)?;
         if matches!(metadata.purpose, Some(UploadPurpose::ExpertAvatar)) {
@@ -73,40 +79,52 @@ impl Store {
         if metadata.session_id.is_none() && metadata.project_id.is_none() {
             return Err(Error::Invalid("请选择会话或项目"));
         }
-        let asset = self
-            .create_asset_details(
-                account,
-                AssetCreation {
-                    session_id: metadata.session_id.as_deref(),
-                    project_id: metadata.project_id.as_deref(),
-                    name: &name,
-                    bytes,
-                    origin: "user",
-                    content_origin: "upload",
-                    request_id: &metadata.request_id,
-                    source_modified_at: metadata.source_modified_at.as_deref(),
-                },
-            )
+        let (asset, already_exists) = self
+            .create_asset_details(AssetCreation {
+                session_id: metadata.session_id.as_deref(),
+                project_id: metadata.project_id.as_deref(),
+                name: &name,
+                content: AssetContent::Bytes(bytes),
+                origin: "user",
+                content_origin: "upload",
+                request_id: &metadata.request_id,
+                source_modified_at: metadata.source_modified_at.as_deref(),
+            })
             .await?;
-        let placement: String = sqlx::query_scalar("SELECT id FROM project_assets WHERE account_id=? AND asset_id=? AND coalesce(project_id,'')=?")
-            .bind(account).bind(&asset.id).bind(match metadata.session_id {
-                Some(session) => self.get_session(account, &session).await?.project_id.unwrap_or_default(),
-                None => metadata.project_id.ok_or(Error::Invalid("缺少项目标识"))?,
-            }).fetch_one(&self.pool).await?;
+        let placement: String = sqlx::query_scalar(
+            "SELECT id FROM project_assets WHERE asset_id=? AND coalesce(project_id,'')=?",
+        )
+        .bind(&asset.id)
+        .bind(match metadata.session_id {
+            Some(session) => self
+                .get_session(&session)
+                .await?
+                .project_id
+                .unwrap_or_default(),
+            None => metadata.project_id.ok_or(Error::Invalid("缺少项目标识"))?,
+        })
+        .fetch_one(&self.pool)
+        .await?;
         let mut document = serde_json::to_value(asset)?;
         document["project_asset_id"] = Value::String(placement);
+        document["already_exists"] = Value::Bool(already_exists);
         Ok(document)
     }
 
-    pub async fn export_assets(&self, account: &str, ids: &[String]) -> Result<AssetExport> {
-        Self::check_account(account)?;
+    pub async fn export_asset_version(&self, asset_id: &str, version_id: &str) -> Result<AssetExport> {
+        let asset = self.get_asset(asset_id).await?;
+        let path = self.asset_path(asset_id, version_id).await?;
+        Ok(AssetExport { name: filename(&asset.name)?, file: File::open(path)? })
+    }
+
+    pub async fn export_assets(&self, ids: &[String]) -> Result<AssetExport> {
         if ids.is_empty() || ids.len() > 100 {
             return Err(Error::Invalid("请选择 1 至 100 项资产"));
         }
         let mut files = Vec::with_capacity(ids.len());
         let mut total = 0_u64;
         for id in ids {
-            let placement = self.project_asset(account, id).await?;
+            let placement = self.project_asset(id).await?;
             let size = placement["version"]["size_bytes"]
                 .as_u64()
                 .ok_or(Error::State("资产文件大小无效"))?;
@@ -123,22 +141,24 @@ impl Store {
             ));
         }
         if let [(name, asset, version)] = files.as_slice() {
-            return Ok(AssetExport {
-                name: name.clone(),
-                bytes: self.read_asset(account, asset, version).await?,
-            });
+            let mut export = self.export_asset_version(asset, version).await?;
+            export.name = name.clone();
+            return Ok(export);
         }
-        let mut archive = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let mut archive = zip::ZipWriter::new(tempfile::tempfile_in(&self.root)?);
         for (index, (name, asset, version)) in files.iter().enumerate() {
             archive.start_file(
                 format!("{:03}-{name}", index + 1),
                 zip::write::SimpleFileOptions::default().unix_permissions(0o600),
             )?;
-            archive.write_all(&self.read_asset(account, asset, version).await?)?;
+            let mut source = File::open(self.asset_path(asset, version).await?)?;
+            io::copy(&mut source, &mut archive)?;
         }
+        let mut file = archive.finish()?;
+        file.rewind()?;
         Ok(AssetExport {
             name: "assets.zip".to_owned(),
-            bytes: archive.finish()?.into_inner(),
+            file,
         })
     }
 }

@@ -20,23 +20,17 @@ pub struct MediaResponse {
 impl Store {
     pub async fn asset_poster_response(
         &self,
-        account: &str,
         asset: &str,
         version: &str,
         method: &str,
     ) -> Result<MediaResponse> {
-        Self::check_account(account)?;
         if !["GET", "HEAD"].contains(&method) {
             return Err(Error::Invalid("媒体请求方法无效"));
         }
-        let path: String = sqlx::query_scalar("SELECT b.path FROM asset_versions v JOIN blobs b ON b.account_id=v.account_id AND b.digest=json_extract(v.metadata,'$.poster_digest') WHERE v.account_id=? AND v.asset_id=? AND v.id=?")
-            .bind(account).bind(asset).bind(version).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
+        let path: String = sqlx::query_scalar("SELECT b.path FROM asset_versions v JOIN blobs b ON b.digest=json_extract(v.metadata,'$.poster_digest') WHERE v.asset_id=? AND v.id=?")
+            .bind(asset).bind(version).fetch_optional(&self.pool).await?.ok_or(Error::NotFound)?;
         let path = std::path::PathBuf::from(path).canonicalize()?;
-        let root = self
-            .root
-            .join("assets")
-            .join(crate::assets::digest(account.as_bytes()))
-            .canonicalize()?;
+        let root = self.root.join("assets").canonicalize()?;
         if !path.starts_with(root) {
             return Err(Error::Invalid("文件路径超出授权范围"));
         }
@@ -57,20 +51,17 @@ impl Store {
 
     pub async fn expert_avatar_response(
         &self,
-        account: &str,
         expert_id: &str,
         version: &str,
         method: &str,
     ) -> Result<MediaResponse> {
-        let expert = self.expert_version(account, expert_id, version).await?;
+        let expert = self.expert_version(expert_id, version).await?;
         let asset = crate::local_api::text(&expert, "avatar_asset_id")?;
         let version = crate::local_api::text(&expert, "avatar_version_id")?;
         if asset.is_empty() || version.is_empty() {
             return Err(Error::NotFound);
         }
-        let response = self
-            .asset_response(account, asset, version, method, None)
-            .await?;
+        let response = self.asset_response(asset, version, method, None).await?;
         if !response.mime_type.starts_with("image/") {
             return Err(Error::Invalid("专家头像需要图片"));
         }
@@ -79,7 +70,6 @@ impl Store {
 
     pub async fn asset_response(
         &self,
-        account: &str,
         asset_id: &str,
         version_id: &str,
         method: &str,
@@ -88,15 +78,13 @@ impl Store {
         if !["GET", "HEAD"].contains(&method) {
             return Err(Error::Invalid("媒体请求方法无效"));
         }
-        let path = self.asset_path(account, asset_id, version_id).await?;
-        let mime_type: String = sqlx::query_scalar(
-            "SELECT mime_type FROM asset_versions WHERE account_id=? AND asset_id=? AND id=?",
-        )
-        .bind(account)
-        .bind(asset_id)
-        .bind(version_id)
-        .fetch_one(&self.pool)
-        .await?;
+        let path = self.asset_path(asset_id, version_id).await?;
+        let mime_type: String =
+            sqlx::query_scalar("SELECT mime_type FROM asset_versions WHERE asset_id=? AND id=?")
+                .bind(asset_id)
+                .bind(version_id)
+                .fetch_one(&self.pool)
+                .await?;
         let mut file = tokio::fs::File::open(path).await?;
         let size = file.metadata().await?.len();
         let (start, length, content_range, status) = if let Some(header) = range {
@@ -161,33 +149,14 @@ async fn response(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Result<R
     let media = access
         .execute(async {
             match parts.as_slice() {
-                ["expert-avatars", scope, id] => {
+                ["expert-avatars", "studio", id] => {
                     uuid::Uuid::parse_str(id).map_err(|_| Error::Invalid("专家标识无效"))?;
                     let version = url
                         .query_pairs()
                         .find(|(key, _)| key == "version")
                         .map(|(_, version)| version.into_owned())
                         .ok_or(Error::Invalid("头像缺少专家版本"))?;
-                    match *scope {
-                        "market" => {
-                            state
-                                .platform()?
-                                .expert_avatar_response(id, &version, request.method().as_str())
-                                .await
-                        }
-                        "studio" | "official" => {
-                            state
-                                .store
-                                .expert_avatar_response(
-                                    &access.account,
-                                    id,
-                                    &version,
-                                    request.method().as_str(),
-                                )
-                                .await
-                        }
-                        _ => Err(Error::Invalid("专家头像来源无效")),
-                    }
+                    state.store.expert_avatar_response(id, &version, request.method().as_str()).await
                 }
                 [asset, version] | [asset, version, "poster"] => {
                     uuid::Uuid::parse_str(asset).map_err(|_| Error::Invalid("资产标识无效"))?;
@@ -195,23 +164,12 @@ async fn response(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Result<R
                     if parts.len() == 3 {
                         state
                             .store
-                            .asset_poster_response(
-                                &access.account,
-                                asset,
-                                version,
-                                request.method().as_str(),
-                            )
+                            .asset_poster_response(asset, version, request.method().as_str())
                             .await
                     } else {
                         state
                             .store
-                            .asset_response(
-                                &access.account,
-                                asset,
-                                version,
-                                request.method().as_str(),
-                                range,
-                            )
+                            .asset_response(asset, version, request.method().as_str(), range)
                             .await
                     }
                 }
@@ -229,14 +187,7 @@ async fn response(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Result<R
         let origin = origin
             .to_str()
             .map_err(|_| Error::Invalid("请求来源编码无效"))?;
-        if ![
-            "tauri://localhost",
-            "http://tauri.localhost",
-            "https://tauri.localhost",
-            "http://127.0.0.1:1420",
-        ]
-        .contains(&origin)
-        {
+        if !allowed_origin(origin, app.config().build.dev_url.as_ref()) {
             return Err(Error::Invalid("媒体请求来源无效"));
         }
         builder = builder.header("Access-Control-Allow-Origin", origin);
@@ -247,6 +198,11 @@ async fn response(app: &tauri::AppHandle, request: Request<Vec<u8>>) -> Result<R
     Ok(builder.body(media.body).expect("构造媒体响应失败"))
 }
 
+fn allowed_origin(origin: &str, dev_url: Option<&Url>) -> bool {
+    ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"].contains(&origin)
+        || cfg!(debug_assertions) && dev_url.is_some_and(|url| url.origin().ascii_serialization() == origin)
+}
+
 pub(crate) fn handle(
     context: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: Request<Vec<u8>>,
@@ -254,21 +210,40 @@ pub(crate) fn handle(
 ) {
     let app = context.app_handle().clone();
     tauri::async_runtime::spawn(async move {
+        let origin = request.headers().get("Origin").and_then(|value|value.to_str().ok()).filter(|origin|allowed_origin(origin, app.config().build.dev_url.as_ref())).map(str::to_owned);
         let response = match response(&app, request).await {
             Ok(response) => response,
             Err(error) => {
                 let error = CommandError::from(error);
-                Response::builder()
+                let mut response = Response::builder()
                     .status(if error.status >= 100 {
                         error.status
                     } else {
                         503
                     })
-                    .header("Content-Type", "text/plain; charset=utf-8")
+                    .header("Content-Type", "text/plain; charset=utf-8");
+                if let Some(origin) = origin {response = response.header("Access-Control-Allow-Origin", origin);}
+                response
                     .body(error.message.into_bytes())
                     .expect("构造媒体错误响应失败")
             }
         };
         responder.respond(response);
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn media_origin_uses_the_configured_development_page_only() -> Result<()> {
+        let page = Url::parse("http://127.0.0.1:4179/studio").map_err(|_|Error::State("页面地址无效"))?;
+        assert!(allowed_origin("tauri://localhost", None));
+        assert!(allowed_origin("http://127.0.0.1:4179", Some(&page)));
+        assert!(!allowed_origin("http://127.0.0.1:1420", Some(&page)));
+        assert!(!allowed_origin("https://example.com", Some(&page)));
+        assert!(!allowed_origin("http://127.0.0.1:4179", None));
+        Ok(())
+    }
 }

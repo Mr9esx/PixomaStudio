@@ -1,4 +1,5 @@
-import { ApiError, baseURL, sessionToken } from './client'
+import { ApiError } from './client'
+import { uploadStudioAsset } from './studio'
 
 type UploadedMedia = {
   key: string
@@ -17,90 +18,49 @@ const MEDIA_MIME_WHITELIST: Record<string, string> = {
   'video/webm': '.webm',
 }
 
-/**
- * 单文件默认上限（25 MiB），与服务端 media.DefaultMaxBytes 保持一致。
- * 仅作为客户端兜底：真实上限由设置项 `media_max_bytes` 决定，未配置时回退到本值。
- */
+/** 工作流封面与示例媒体的大小上限。 */
 export const DEFAULT_MEDIA_MAX_BYTES = 25 * 1024 * 1024
 
-/**
- * Resolve the effective per-upload cap from the configured value.
- * `0` / `undefined` / 负数均视为「使用默认」。
- */
 export function resolveMediaMaxBytes(value: number | undefined): number {
   return typeof value === 'number' && value > 0
     ? value
     : DEFAULT_MEDIA_MAX_BYTES
 }
 
-function authHeaders(): Record<string, string> {
-  const token = sessionToken()
-  return token ? { Authorization: `Bearer ${token}` } : {}
-}
-
-/** 上传单个媒体文件到管理端。 */
+/** 上传媒体并保存本地资产版本地址。 */
 export async function uploadMedia(file: File): Promise<UploadedMedia> {
-  const form = new FormData()
-  form.append('file', file, file.name)
-  let res: Response
-  try {
-    res = await fetch(`${baseURL()}/api/v1/media/`, {
-      method: 'POST',
-      body: form,
-      credentials: 'include',
-      headers: { Accept: 'application/json', ...authHeaders() },
-    })
-  } catch {
-    throw new ApiError(0, '无法连接后台，上传失败')
+  if (!isAllowedMedia(file.type, file.name) || file.size > DEFAULT_MEDIA_MAX_BYTES) {
+    throw new ApiError(400, '媒体类型无效或文件超过 25 MiB')
   }
-  let body: unknown = undefined
-  try {
-    body = await res.json()
-  } catch {
-    // ignore
-  }
-  if (!res.ok) {
-    const msg =
-      typeof body === 'object' &&
-      body !== null &&
-      'error' in body &&
-      typeof (body as { error: unknown }).error === 'string'
-        ? (body as { error: string }).error
-        : `上传失败 (${res.status})`
-    throw new ApiError(res.status, msg)
-  }
-  return body as UploadedMedia
+  const asset = await uploadStudioAsset(file)
+  const version = asset.versions.find((item) => item.version === asset.current_version)
+  if (!version || !['image', 'video'].includes(asset.kind)) throw new ApiError(400, '工作流预览需要图片或视频')
+  const address = `${version.content_url}#${encodeURIComponent(file.name)}`
+  return { key: address, url: address, mime: version.mime_type, size: version.size_bytes }
 }
 
-/** 拼接媒体预览请求路径。key 形如 previews/<file>。 */
 export function mediaApiPath(key: string): string {
-  const trimmed = key.replace(/^\/+/, '')
-  return `/api/v1/media/${trimmed}`
+  const address = resolveMediaKey(key)
+  if (!address) throw new ApiError(400, '本地媒体地址无效')
+  return address
 }
 
-/** 拉取媒体为 Blob（携带鉴权），用于 <img>/<video> 预览。 */
 export async function fetchMediaBlob(key: string): Promise<Blob> {
-  let res: Response
-  try {
-    res = await fetch(`${baseURL()}/api/v1/media/${key.replace(/^\/+/, '')}`, {
-      credentials: 'include',
-      headers: authHeaders(),
-    })
-  } catch {
-    throw new ApiError(0, '无法连接后台，加载媒体失败')
-  }
+  const res = await fetch(mediaApiPath(key))
   if (!res.ok) throw new ApiError(res.status, `加载媒体失败 (${res.status})`)
   return res.blob()
 }
 
-/** 由存储的 preview 值推导可预览的媒体 key；无法识别时返回 null。 */
 export function resolveMediaKey(preview?: string): string | null {
-  if (!preview) return null
-  const p = preview.trim()
-  if (!p) return null
-  if (/^previews\/.+/i.test(p)) return p
-  const m = p.match(/^\/?api\/v1\/media\/(previews\/.+)$/i)
-  return m ? m[1] : null
+  if (!preview?.trim()) return null
+  let address: URL
+  try { address = new URL(preview.trim()) } catch { return null }
+  const local = address.protocol === 'pixoma-media:' && address.hostname === 'localhost'
+  const windows = address.protocol === 'http:' && address.hostname === 'pixoma-media.localhost'
+  const parts = address.pathname.split('/')
+  if ((!local && !windows) || address.port || address.username || address.password || address.search
+    || parts.length !== 3 || !parts[1] || !parts[2]) return null
+  return address.toString()
 }
 
 /** 客户端预检：类型是否在白名单内。 */

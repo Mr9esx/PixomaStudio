@@ -5,7 +5,7 @@ const stableVersion = z.string().refine(value => valid(value) === value && prere
 export const expertPartSchema = z.discriminatedUnion('type', [
   z.object({ type: z.literal('text'), text: z.string().min(1, '填写执行说明') }),
   z.object({ type: z.literal('skill'), skill_id: z.string().min(1), version: stableVersion, name: z.string().optional() }),
-  z.object({ type: z.literal('workflow'), workflow_id: z.string().min(1), version_id: z.number().int().positive(), name: z.string().optional() }),
+  z.object({ type: z.literal('workflow'), workflow_id: z.string().min(1), version_id: z.string().min(1), name: z.string().optional() }),
 ])
 export type ExpertPart = z.infer<typeof expertPartSchema>
 
@@ -19,7 +19,7 @@ export const expertFormSchema = z.object({
   avatar_version_id: z.string(),
   examples: z.array(z.string()),
   skill_refs: z.array(z.object({ skill_id: z.string(), version: stableVersion })),
-  workflow_refs: z.array(z.object({ workflow_id: z.string(), version_id: z.number().int().positive() })),
+  workflow_refs: z.array(z.object({ workflow_id: z.string(), version_id: z.string().min(1) })),
   sop: z.array(z.object({ id: z.string().min(1), title: z.string().trim().min(1, '填写步骤名称'), instruction_parts: z.array(expertPartSchema).min(1, '填写步骤说明') })),
 }).superRefine((value, ctx) => {
   if (Boolean(value.avatar_asset_id) !== Boolean(value.avatar_version_id)) ctx.addIssue({ code: 'custom', path: ['avatar_version_id'], message: '选择头像版本' })
@@ -28,7 +28,7 @@ export const expertFormSchema = z.object({
     if (steps.has(step.id)) ctx.addIssue({ code: 'custom', path: ['sop', index, 'id'], message: '步骤标识重复' })
     steps.add(step.id)
   })
-  const versions = new Map<string, string | number>()
+  const versions = new Map<string, string>()
   const sections = [{ path: ['prompt_parts'], parts: value.prompt_parts }, ...value.sop.map((step, index) => ({ path: ['sop', index, 'instruction_parts'], parts: step.instruction_parts }))]
   sections.forEach(section => section.parts.forEach((part, index) => {
     if (part.type === 'text') return

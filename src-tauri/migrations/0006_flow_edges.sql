@@ -1,2 +1,0 @@
-CREATE UNIQUE INDEX flow_edge_relationship ON flow_edges(account_id,session_id,source,target,coalesce(json_extract(document,'$.source_output_key'),''),coalesce(json_extract(document,'$.target_input_key'),''));
-CREATE UNIQUE INDEX flow_edge_input ON flow_edges(account_id,session_id,target,json_extract(document,'$.target_input_key')) WHERE coalesce(json_extract(document,'$.target_input_key'),'')<>'';

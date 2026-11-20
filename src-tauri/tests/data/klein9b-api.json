@@ -1,0 +1,44 @@
+{
+  "10": {
+    "inputs": { "unet_name": "darkBeast30BF16INT8_dbkleinv2BFS.safetensors", "weight_dtype": "default" },
+    "class_type": "UNETLoader", "_meta": { "title": "UNet加载器" }
+  },
+  "20": {
+    "inputs": { "clip_name": "qwen_3_8b_fp8mixed.safetensors", "type": "flux2", "device": "default" },
+    "class_type": "CLIPLoader", "_meta": { "title": "加载CLIP" }
+  },
+  "30": {
+    "inputs": { "vae_name": "flux2-vae.safetensors" },
+    "class_type": "VAELoader", "_meta": { "title": "加载VAE" }
+  },
+  "40": {
+    "inputs": {
+      "text": "a young male programmer, short black hair, wearing a casual hoodie, sitting at a desk with dual monitors displaying code and a red error popup, frustrated expression, indoor home office, soft desk lamp lighting, realistic photo, shallow depth of field, 35mm lens",
+      "clip": ["20", 0]
+    },
+    "class_type": "CLIPTextEncode", "_meta": { "title": "CLIP文本编码" }
+  },
+  "41": {
+    "inputs": { "text": "low quality, blurry, distorted, extra fingers, bad anatomy, watermark, text", "clip": ["20", 0] },
+    "class_type": "CLIPTextEncode", "_meta": { "title": "CLIP文本编码" }
+  },
+  "50": {
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 },
+    "class_type": "EmptyFlux2LatentImage", "_meta": { "title": "空Latent图像（Flux2）" }
+  },
+  "60": {
+    "inputs": {
+      "seed": 42, "steps": 20, "cfg": 1, "sampler_name": "euler", "scheduler": "simple", "denoise": 1,
+      "model": ["10", 0], "positive": ["40", 0], "negative": ["41", 0], "latent_image": ["50", 0]
+    },
+    "class_type": "KSampler", "_meta": { "title": "K采样器" }
+  },
+  "70": {
+    "inputs": { "samples": ["60", 0], "vae": ["30", 0] },
+    "class_type": "VAEDecode", "_meta": { "title": "VAE解码" }
+  },
+  "80": {
+    "inputs": { "filename_prefix": "Klein9B", "images": ["70", 0] },
+    "class_type": "SaveImage", "_meta": { "title": "保存图像" }
+  }
+}

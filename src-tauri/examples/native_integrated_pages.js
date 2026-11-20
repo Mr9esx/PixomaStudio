@@ -1,0 +1,173 @@
+void (async () => {
+  if (window.__PIXOMA_INTEGRATION_RUNNING__) return
+  window.__PIXOMA_INTEGRATION_RUNNING__ = true
+  const invoke = window.__TAURI_INTERNALS__.invoke
+  const emit = (event, payload) => invoke('plugin:event|emit', { event, payload })
+  const request = (method, path, body = null) => invoke('studio_request', { request: { method, path, body } })
+  const assert = (condition, message) => { if (!condition) throw new Error(message) }
+  const wait = async (condition, message) => {
+    const end = Date.now() + 20000
+    while (!condition()) {
+      if (Date.now() > end) throw new Error(message)
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+  }
+  const navigate = async (path, ready) => {
+    history.pushState({}, '', path)
+    dispatchEvent(new PopStateEvent('popstate'))
+    await wait(ready, `页面未就绪：${path}`)
+  }
+  const button = label => [...document.querySelectorAll('button')].find(item => item.getClientRects().length && item.textContent.trim() === label)
+  const click = label => { const target = button(label); assert(target, `操作不存在：${label}`); target.click() }
+  const fill = (selector, value) => {
+    const input = document.querySelector(selector)
+    assert(input, `输入框不存在：${selector}`)
+    Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(input, value)
+    input.dispatchEvent(new Event('input', { bubbles: true }))
+  }
+  const noDialog = () => assert(!document.querySelector('[role="dialog"]'), '主体操作仍显示模态窗口')
+  const tab = label => [...document.querySelectorAll('[role="tab"]')].find(item => item.textContent.trim() === label)?.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, button: 0, ctrlKey: false }))
+  const progress = stage => emit('studio:layout-progress', { stage })
+  try {
+    await emit('studio:layout-size', [1440, 900])
+    await wait(() => innerWidth === 1440, '检查窗口尺寸没有更新')
+    await wait(() => button('技能与专家'), '应用未启动')
+    click('技能与专家')
+    await wait(() => button('创建技能'), '技能列表没有打开')
+    click('创建技能')
+    await wait(() => document.querySelector('#skill-name'), '技能编辑器未打开')
+    noDialog()
+    assert(document.querySelector('[data-slot="studio-page"] #skill-name'), '技能编辑器没有进入主体页面')
+    tab('基本信息')
+    await wait(() => document.querySelector('#skill-name')?.getClientRects().length, '基本信息没有显示')
+    fill('#skill-name', 'ui-integration-check')
+    fill('#skill-description', '页面交互检查')
+    tab('文件')
+    await wait(() => document.querySelector('.cm-content[contenteditable="true"]')?.getClientRects().length, '文件正文没有显示')
+    const editor = document.querySelector('.cm-content[contenteditable="true"]')
+    assert(editor, '正文编辑器不存在')
+    editor.focus()
+    const range = document.createRange()
+    range.selectNodeContents(editor)
+    const selection = getSelection()
+    selection.removeAllRanges()
+    selection.addRange(range)
+    assert(document.execCommand('insertText', false, '---\nname: ui-integration-check\ndescription: 页面交互检查\n---\n\n# 页面检查\n\n读取资料并整理创作要求。'), '正文输入失败')
+    await wait(() => button('保存') && !button('保存').disabled, '技能内容未通过校验')
+    click('保存')
+    await wait(() => document.querySelector('#skill-save-version'), '版本信息没有在页面展开')
+    noDialog()
+    fill('#skill-version-notes', '验证主体内保存')
+    click('保存版本')
+    await wait(() => button('创建技能'), '保存后没有返回技能列表')
+    const list = await request('GET', '/api/v1/studio/skills')
+    const skill = list.find(item => item.name === 'ui-integration-check')
+    assert(skill?.version === '1.0.0', '真实技能版本没有保存')
+    await progress('技能创建通过')
+    fill('[aria-label="搜索名称或介绍"]', 'ui-integration-check')
+    await wait(() => location.search.includes('q='), '搜索条件没有写入地址')
+    click('编辑')
+    await wait(() => document.querySelector('#skill-name'), '已保存技能没有打开')
+    tab('基本信息')
+    await wait(() => document.querySelector('#skill-description')?.getClientRects().length, '基本信息没有显示')
+    fill('#skill-description', '保留修改内容')
+    document.querySelector('[aria-label="返回技能列表"]').click()
+    await wait(() => document.querySelector('[role="alertdialog"]'), '返回没有检查未保存内容')
+    click('继续编辑')
+    await wait(() => !document.querySelector('[role="alertdialog"]'), '确认没有关闭')
+    assert(document.querySelector('#skill-description').value === '保留修改内容', '继续编辑丢失内容')
+    history.back()
+    await wait(() => document.querySelector('[role="alertdialog"]'), '浏览器后退没有检查未保存内容')
+    click('继续编辑')
+    await wait(() => !document.querySelector('[role="alertdialog"]'), '浏览器返回确认没有关闭')
+    click('工作流')
+    await wait(() => document.querySelector('[role="alertdialog"]'), '菜单切换没有检查未保存内容')
+    click('继续编辑')
+    await wait(() => !document.querySelector('[role="alertdialog"]'), '菜单切换确认没有关闭')
+    click('保存')
+    await wait(() => document.querySelector('#skill-save-version'), '更新版本区域没有显示')
+    assert(document.querySelector('#skill-save-version').value === '1.0.1', '后续版本号没有递增')
+    click('保存版本')
+    await wait(() => button('创建技能'), '更新后没有返回列表')
+    assert(location.search.includes('q=ui-integration-check'), '返回没有保留搜索条件')
+    const updated = await request('GET', `/api/v1/studio/skills/${skill.id}`)
+    assert(updated.description === '保留修改内容' && updated.version === '1.0.1', '技能更新没有保存')
+    click('编辑')
+    await wait(() => document.querySelector('#skill-name'), '技能没有再次打开')
+    tab('版本记录')
+    await wait(() => document.querySelector('#skill-versions-panel button'), '版本记录没有显示')
+    document.querySelector('#skill-versions-panel button').click()
+    await wait(() => document.querySelector('[aria-label="技能版本内容"] .cm-content'), '历史正文没有显示')
+    noDialog()
+    document.querySelector('[aria-label="返回技能列表"]').click()
+    await wait(() => button('创建技能'), '历史返回没有完成')
+    await progress('技能更新、历史与离开检查通过')
+    const session = await request('POST', '/api/v1/studio/sessions', { request_id: crypto.randomUUID() })
+    await request('POST', '/api/v1/studio/assets/text', { session_id: session.id, name: '页面交互资料', content: '# 页面交互资料\n\n资产内容预览。', request_id: crypto.randomUUID() })
+    await navigate('/studio/library', () => document.querySelector('[data-slot="library-project-card"]'))
+    document.querySelector('[data-slot="library-project-card"][data-project-id=""]').click()
+    await wait(() => document.querySelector('[data-slot="studio-asset-card"]'), '项目资产没有显示')
+    document.querySelector('[data-slot="asset-open"]').click()
+    await wait(() => document.querySelector('[data-slot="asset-inspector"] header h2'), '资产属性没有显示')
+    noDialog()
+    document.querySelector('[aria-label="重命名资产"]').click()
+    await wait(() => document.querySelector('[aria-label="资产名称"]'), '名称没有进入编辑')
+    fill('[aria-label="资产名称"]', '更新后的页面资料')
+    document.querySelector('[aria-label="资产名称"]').closest('form').requestSubmit()
+    await wait(() => document.querySelector('[data-slot="asset-inspector"] header h2')?.textContent === '更新后的页面资料', '资产名称没有保存')
+    document.querySelector('[aria-label="放大资产"]').click()
+    await wait(() => document.querySelector('[aria-label="返回资产详情"]'), '资产没有放大')
+    noDialog()
+    document.querySelector('[aria-label="返回资产详情"]').click()
+    await wait(() => document.querySelector('[aria-label="关闭资产详情"]'), '资产详情没有恢复')
+    await progress('资产预览与编辑通过')
+    await navigate('/studio/expert-editor/new', () => document.querySelector('#expert-name'))
+    noDialog()
+    assert(document.querySelector('[data-slot="studio-desktop-sidebar"]'), '专家编辑页面没有保留侧栏')
+    fill('#expert-name', '页面专家检查')
+    tab('工作方法')
+    await wait(() => button('增加步骤'), '工作方法没有显示')
+    click('增加步骤')
+    await wait(() => document.querySelector('[aria-label="步骤 1 名称"]'), '专家步骤没有添加')
+    fill('[aria-label="步骤 1 名称"]', '整理创作要求')
+    click('保存版本')
+    await wait(() => document.querySelector('[aria-label="保存专家版本"]'), '专家版本区域没有展开')
+    noDialog()
+    document.querySelector('[aria-label="返回专家列表"]').click()
+    await wait(() => document.querySelector('[role="alertdialog"]'), '专家未保存内容没有提示')
+    click('继续编辑')
+    await wait(() => !document.querySelector('[role="alertdialog"]'), '专家确认没有关闭')
+    assert(document.querySelector('[aria-label="步骤 1 名称"]').value === '整理创作要求', '专家步骤没有保留')
+    document.querySelector('[aria-label="返回专家列表"]').click()
+    await wait(() => document.querySelector('[role="alertdialog"]'), '专家返回没有再次提示')
+    click('放弃修改')
+    await wait(() => button('创建专家'), '专家没有返回列表')
+    await progress('专家编辑与返回检查通过')
+    const widths = []
+    for (const width of [1440, 1024, 760]) {
+      await emit('studio:layout-size', [width, 900])
+      await wait(() => innerWidth === width, '窗口宽度没有更新')
+      const pages = [
+        ['/studio/library', () => document.querySelector('[data-slot="studio-library-toolbar"]')],
+        ['/studio/workflows', () => document.querySelector('[data-slot="studio-page"] h1')?.textContent === '工作流'],
+        ['/studio/skills', () => button('创建技能')],
+        [`/studio/skills?edit=${skill.id}`, () => document.querySelector('#skill-name')],
+        ['/studio/expert-editor/new', () => document.querySelector('#expert-name')],
+      ]
+      for (const [path, ready] of pages) {
+        await navigate(path, ready)
+        noDialog()
+        const main = document.querySelector('[data-slot="studio-page"]')
+        assert(main.scrollWidth <= main.clientWidth, `${width} ${path} 主体超出窗口`)
+        for (const control of main.querySelectorAll('.studio-page-header button')) {
+          if (!control.getClientRects().length) continue
+          assert(control.getBoundingClientRect().right <= main.getBoundingClientRect().right, `${width} ${path} 顶部按钮超出窗口`)
+        }
+        widths.push({ width, path, scroll: main.scrollWidth, client: main.clientWidth })
+      }
+    }
+    await emit('studio:layout-result', { success: true, skillId: skill.id, widths })
+  } catch (error) {
+    await emit('studio:layout-result', { success: false, message: error.message, visibility: document.visibilityState, focused: document.hasFocus(), location: location.href, dialogs: [...document.querySelectorAll('[role="alertdialog"], [role="dialog"]')].map(item => ({ state: item.dataset.state, display: getComputedStyle(item).display, pointerEvents: getComputedStyle(item).pointerEvents, animations: item.getAnimations().map(animation => ({ state: animation.playState, time: animation.currentTime })) })), pageText: document.body.innerText.slice(0, 1500) })
+  }
+})()

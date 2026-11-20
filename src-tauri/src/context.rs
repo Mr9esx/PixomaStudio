@@ -38,7 +38,6 @@ pub(crate) struct RunContext {
 impl Store {
     pub(crate) async fn prepare_run_context(
         &self,
-        account: &str,
         input: &Value,
         model: &ModelInput,
         prompt: &str,
@@ -72,6 +71,24 @@ impl Store {
             }
         }
         let mut context = RunContext::default();
+        if let Some(selection) = input.get("material_context").filter(|value|!value.is_null()) {
+            let mut material = self.video_material_chat_context(text(selection,"video_id")?,text(input,"session_id")?,selection["asset_version_id"].as_str()).await?;
+            if material["material_id"] != selection["material_id"] {return Err(Error::Invalid("素材对话目标已修改，请重新发送"));}
+            if selection["asset_id"].is_null() && selection["asset_version_id"].is_null() {
+                material["asset_id"] = Value::Null;
+                material["asset_version"] = Value::Null;
+            } else if material["asset_id"] != selection["asset_id"] || !selection["asset_version_id"].is_string() {
+                return Err(Error::Invalid("素材上下文的资产与版本不匹配"));
+            }
+            if let (Some(asset_id),Some(version_id)) = (material["asset_id"].as_str(),material["asset_version"]["id"].as_str()) {
+                references.push(AssetReference {asset_id:asset_id.to_owned(),asset_version_id:version_id.to_owned()});
+            }
+            context.documents.push(Document {
+                id:format!("video-material:{}",text(&material,"material_id")?),
+                text:format!("本次消息的创作对象与固定素材版本：\n{}\n围绕此素材创作，结果保留在当前对话。用户明确采用结果时调用 studio_adopt_video_material_result；更新视频分镜引用需要用户指定范围。",serde_json::to_string(&material)?),
+                additional_props:HashMap::from([("material_id".to_owned(),text(&material,"material_id")?.to_owned()),("name".to_owned(),text(&material,"name")?.to_owned())]),
+            });
+        }
         if let Some(expert) = expert {
             let content: crate::experts::ExpertContent = serde_json::from_value(expert.clone())?;
             context.expert = Some(expert.clone());
@@ -101,7 +118,7 @@ impl Store {
             )) {
                 continue;
             }
-            let asset = self.get_asset(account, &reference.asset_id).await?;
+            let asset = self.get_asset(&reference.asset_id).await?;
             let version = asset
                 .versions
                 .iter()
@@ -118,9 +135,8 @@ impl Store {
                 ]),
             };
             if version.mime_type.starts_with("text/") || version.mime_type == "application/json" {
-                document.text =
-                    String::from_utf8(self.read_asset(account, &asset.id, &version.id).await?)
-                        .map_err(|_| Error::Invalid("参考文档需要 UTF-8 文本编码"))?;
+                document.text = String::from_utf8(self.read_asset(&asset.id, &version.id).await?)
+                    .map_err(|_| Error::Invalid("参考文档需要 UTF-8 文本编码"))?;
             } else if version.mime_type.starts_with("image/") {
                 if !model.capabilities.vision {
                     return Err(Error::Invalid("所选模型不支持图片输入"));
@@ -133,7 +149,7 @@ impl Store {
                     _ => return Err(Error::Invalid("模型图片格式不受支持")),
                 };
                 media.push(UserContent::image_base64(
-                    STANDARD.encode(self.read_asset(account, &asset.id, &version.id).await?),
+                    STANDARD.encode(self.read_asset(&asset.id, &version.id).await?),
                     Some(media_type),
                     None,
                 ));
@@ -151,12 +167,12 @@ impl Store {
             context.documents.push(document);
         }
         for (id, version) in crate::skills::requested_skills(input)? {
-            let current = self.get_skill(account, &id).await?;
+            let current = self.get_skill(&id).await?;
             if current["enabled"] != true || current["available"] == false {
                 return Err(Error::Invalid("所选技能已停用或不可用"));
             }
             let version = version.as_deref().unwrap_or(text(&current, "version")?);
-            let snapshot = self.skill_version(account, &id, version).await?;
+            let snapshot = self.skill_version(&id, version).await?;
             let mut instructions = text(&snapshot, "prompt")?.to_owned();
             if let Some(files) = snapshot["files"].as_array() {
                 instructions.push_str("\n\n使用 load_skill 读取本运行保存的技能文件。文件目录：\n");
@@ -176,10 +192,10 @@ impl Store {
             context.skills.push(snapshot);
         }
         for (id, version) in crate::workflows::requested_workflows(input)? {
-            let workflow = self.workflow_version(account, &id, version).await?;
+            let workflow = self.workflow_version(&id, version.as_deref()).await?;
             context.documents.push(Document {
                 id: format!("workflow:{id}:{}", workflow["version_id"]),
-                text: format!("所引用工作流的目录内容与输入要求：\n{}\n远程 run_workflow 使用 case_id 和 inputs 提交，实际计算版本由服务决定。", serde_json::to_string(&workflow)?),
+                text: format!("所引用工作流的版本与输入要求：\n{}\n调用 studio_run_workflow 时使用 workflow_id、version_id 和 inputs，执行固定的本地版本。", serde_json::to_string(&workflow)?),
                 additional_props: HashMap::from([
                     ("workflow_id".to_owned(), id),
                     ("name".to_owned(), text(&workflow, "name")?.to_owned()),
@@ -201,7 +217,6 @@ impl Store {
 
     pub(crate) async fn reference_run_assets(
         transaction: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
-        account: &str,
         run: &str,
         session: &str,
         context: &RunContext,
@@ -212,15 +227,14 @@ impl Store {
             return Ok(());
         }
         let turn: i64 =
-            sqlx::query_scalar("SELECT count(*) FROM runs WHERE account_id=? AND session_id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT count(*) FROM runs WHERE session_id=?")
                 .bind(session)
                 .fetch_one(&mut **transaction)
                 .await?;
         for asset in &context.assets {
-            sqlx::query("INSERT INTO asset_usages(id,account_id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,run_id,created_at) SELECT ?,account_id,id,?,?,title,'referenced',?,? FROM sessions WHERE account_id=? AND id=? ON CONFLICT(session_id,asset_id,asset_version_id,usage_kind) DO NOTHING")
+            sqlx::query("INSERT INTO asset_usages(id,session_id,asset_id,asset_version_id,session_title_snapshot,usage_kind,run_id,created_at) SELECT ?,id,?,?,title,'referenced',?,? FROM sessions WHERE id=? ON CONFLICT(session_id,asset_id,asset_version_id,usage_kind) DO NOTHING")
                 .bind(Uuid::new_v4().to_string()).bind(&asset.asset_id).bind(&asset.asset_version_id).bind(run).bind(now)
-                .bind(account).bind(session).execute(&mut **transaction).await?;
+                .bind(session).execute(&mut **transaction).await?;
             let id = Uuid::new_v4().to_string();
             let document = context
                 .documents
@@ -232,11 +246,11 @@ impl Store {
             let event = json!({ "id": id, "run_id": run, "turn_number": turn, "step_number": 0, "kind": "CONTEXT_INJECTED", "source": asset.asset_version_id,
                 "detail": format!("引用资产 {}，版本 {}", asset.name, asset.version), "delta_tokens_estimated": crate::context_records::estimated_tokens(&document.to_string()),
                 "before_tokens_estimated": null, "after_tokens_estimated": null, "created_at": now });
-            sqlx::query("INSERT INTO context_events(id,account_id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?,?)")
-                .bind(id).bind(account).bind(session).bind(run).bind(now).bind(event.to_string()).execute(&mut **transaction).await?;
-            sqlx::query("INSERT INTO project_assets(id,account_id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at) SELECT ?,account_id,project_id,?,?,?,?,? FROM sessions WHERE account_id=? AND id=? ON CONFLICT DO NOTHING")
+            sqlx::query("INSERT INTO context_events(id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?)")
+                .bind(id).bind(session).bind(run).bind(now).bind(event.to_string()).execute(&mut **transaction).await?;
+            sqlx::query("INSERT INTO project_assets(id,project_id,asset_id,asset_version_id,display_name,added_at,updated_at) SELECT ?,project_id,?,?,?,?,? FROM sessions WHERE id=? ON CONFLICT DO NOTHING")
                 .bind(Uuid::new_v4().to_string()).bind(&asset.asset_id).bind(&asset.asset_version_id).bind(&asset.name).bind(now).bind(now)
-                .bind(account).bind(session).execute(&mut **transaction).await?;
+                .bind(session).execute(&mut **transaction).await?;
         }
         for document in &context.documents {
             let (kind, version_key) = if document.additional_props.contains_key("skill_id") {
@@ -261,8 +275,8 @@ impl Store {
                 "kind": "CONTEXT_INJECTED", "source": document.id, "detail": format!("引用{kind} {name}，版本 {version}"),
                 "delta_tokens_estimated": crate::context_records::estimated_tokens(&document.to_string()),
                 "before_tokens_estimated": null, "after_tokens_estimated": null, "created_at": now });
-            sqlx::query("INSERT INTO context_events(id,account_id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?,?)")
-                .bind(id).bind(account).bind(session).bind(run).bind(now).bind(event.to_string()).execute(&mut **transaction).await?;
+            sqlx::query("INSERT INTO context_events(id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?)")
+                .bind(id).bind(session).bind(run).bind(now).bind(event.to_string()).execute(&mut **transaction).await?;
         }
         Ok(())
     }

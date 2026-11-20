@@ -1,228 +1,279 @@
-# Pixoma Studio 桌面 App 开发计划
+# Pixoma Studio 独立功能实施计划
 
-> 执行要求：使用 `executing-plans`，由主会话按任务顺序执行。每项任务记录测试失败、实现与验证结果。
+日期：2026-10-29
 
-**目标：** 在 `/Users/mr9esx/Documents/PixomaStudio` 建立独立的 Tauri + Rust 创作 App，保留现有前端并移除平台产品入口。
+> 执行方式：主会话使用 `executing-plans` 按任务顺序实施。业务行为采用 TDD，使用真实文件、SQLite 和实际服务。下列任务完成后逐项填写验证结果。
 
-**结构：** React 保留 Studio 页面，通过 Tauri Commands 和 Channel 调用 Rust。Rust 使用 Rig、rmcp、SQLite 和本地文件实现业务，只通过平台公开接口访问账号、官方内容与远程工作流。
+**目标：** 在现有 Studio 工程中完成本地业务、工作流、Rust 计算服务和 Go Edge Agent，页面沿用原组件与样式。
 
-**使用的技术：** Tauri 2、Rust、Rig、rmcp、Tokio、SQLx、reqwest、keyring、React、TypeScript、Vite、shadcn/ui。
+**结构：** React 通过 Tauri Commands 和 Channel 调用 Rust。Rust 共用现有 Store、Agent、MCP 与资产功能，使用 Axum 承接节点接口；Go Agent 独立运行并执行 ComfyUI。
 
-## 全局约束
+**使用的技术：** Tauri、Rust、Tokio、SQLx、SQLite、reqwest、serde、Axum、Rig、rmcp、Go、React、TypeScript、Vite、shadcn/ui。
 
-- 设计依据：`docs/design.md`。
-- 前端文件独立复制；应用启动、路由、传输与资源地址按桌面环境调整。
-- 禁止新工程依赖 Pixoma 源码、内部 Go 包或数据库。
-- 平台业务保持现状，只移除产品入口；保留平台管理与分发服务。
-- 保留三种模型协议与三种权限模式的原有 identifier。
-- 使用真实文件、数据库与服务；不使用 mock 或截图测试。
-- 修改文件使用编辑工具；格式工具只执行检查。
-- Git 提交明确指定作者与提交者为 `李卓洲 <1138099359@qq.com>`。
-- 独立目录承担隔离；Pixoma 现有改动按当前状态保留。
+## 全局要求
 
-## 任务 1：独立工程与原始前端清单
+- 设计依据为 `docs/design.md`；外部接口依据为 `docs/standalone-research.md`。
+- Studio 的业务表、方法、类型与请求移除 `account_id`，业务 ID 直接标识对象。
+- 实施仅覆盖功能与代码；使用全新应用目录建立数据库，不转换既有数据，不自动删除用户目录。
+- 默认数据目录为 Tauri 本地应用目录下的 `standalone/`，数据库为 `studio-standalone.sqlite`。
+- 不新增登录、注册、身份、平台目录、发布、Topic、任务队列设置或平台地址要求。
+- 计算服务使用 Rust；ComfyUI 执行与节点采集使用独立 Go Agent。
+- 前端从 Pixoma 原组件复制并调整，优先复用已经安装的 shadcn/ui；遵循 Pixoma 令牌、图标、文案与状态规范。
+- 全部文件修改使用编辑工具。测试产物使用 `.local-cache/`，格式工具只执行检查。
+- 不使用 mock、固定成功响应、截图测试或未执行的通过记录。服务不可用时记录实际阻碍。
+- 不修改 Pixoma 的业务数据或计算服务；迁移后的构建、导入与运行依赖全部位于 Studio 工程及其正常依赖中。
+- 提交时显式设置作者与提交者为 `李卓洲 <1138099359@qq.com>`。
 
-文件：新工程 `package.json`、`index.html`、`vite.config.ts`、`tsconfig.json`、`.gitignore`、`src/main.tsx`、`src/routes/`、`src-tauri/Cargo.toml`、`src-tauri/tauri.conf.json`、`src-tauri/build.rs`、`src-tauri/src/lib.rs`、`src-tauri/src/main.rs`。
+## 任务 1：本地启动、请求与数据库
 
-使用 TypeScript Compiler API 读取当前 Studio 的 import 依赖，输出只读清单。把 Studio、账号页面、市场、专家编辑、使用的 UI、样式与资源复制到独立目录。只复制实际需要的前端依赖；新工程包清单独立维护。
+当前进度：全部 Rust 业务方法、数据库表和索引均使用本地业务 ID。桌面请求、媒体、运行恢复与工作流工具直接访问本地数据。全新数据目录直接进入 Studio，24 项真实桌面 DOM 页面检查通过。节点 HTTP 服务已接入应用启动，本机 Agent 的管理和打包继续按任务 9 处理。
 
-- [x] 记录现有入口及其传递依赖，核对所需静态资源。
-- [x] 建立独立前端与 Cargo 配置，Tauri 窗口加载本地资源。
-- [x] 配置测试产物位于被忽略的 `.local-cache/`。
-- [x] 运行 `pnpm install`、`pnpm exec tsc --noEmit`、`pnpm build`、`cargo check --manifest-path src-tauri/Cargo.toml`。
+**修改：** `src-tauri/src/lib.rs`、`desktop_state.rs`、`commands.rs`、`local_api.rs`、`store.rs`、`media.rs`、全部使用账号参数的业务模块及 `src-tauri/migrations/`；`src/routes/`、`src/features/studio/studio-auth.tsx`、`studio-workspace.tsx`、`studio-personal-settings.tsx`、`src/lib/api/operations.ts`、`src/lib/identity-cache.ts`、`src-tauri/build.rs`。
 
-验收：依赖安装、类型检查、前端构建和 Rust 编译分别通过；构建过程不引用 Pixoma 目录。
+**移除：** 平台 Client、平台配置、发布模块、登录与注册页面，以及实际只被这些入口使用的类型、路由和依赖。按 import 调用关系确认文件范围。
 
-## 任务 2：本地数据库、项目与会话
+**测试：** `src-tauri/tests/storage.rs`、`local_api.rs`、`credentials.rs`、`media.rs`；同步现有业务检查与 `tests/integration.rs` 的模块注册。
 
-文件：`src-tauri/migrations/0001_studio.sql`、`src-tauri/src/store.rs`、`src-tauri/src/projects.rs`、`src-tauri/src/sessions.rs`、`src-tauri/tests/storage.rs`。
+**接口：** `LocalApi::request(&self, request: LocalRequest) -> Result<Value>`；`Store::create_project(&self, name: &str) -> Result<Project>`；`Store::create_session(&self, request_id: &str) -> Result<Session>`。其他业务方法保持原参数顺序并移除账号参数。
 
-接口：`Store::open(path: &Path) -> Result<Store>` 创建独立数据库并运行迁移；项目和会话操作按账号范围执行，返回现有前端 DTO。事务保证项目删除后，会话和项目资产按当前交互移到未归属项目。
+- [x] 编写实际 SQLite 检查，创建项目与会话后重新打开仍可读取；重复 `request_id` 返回同一会话。
+- [ ] 运行检查并确认当前签名无法通过；记录命令和失败原因。
+- [x] 重建单一空间的 SQL 结构，更新所有调用、索引、唯一约束、缓存键、媒体读取与运行恢复入口。请求入口直接调用本地业务。
+- [x] 删除身份查询、页面门禁和发布入口；启动直接打开 Studio，构建不读取平台地址。
+- [x] 使用 `PRAGMA table_info` 和 `sqlite_master` 检查全部业务表与索引，确认不存在账号列或占位账号。
+- [x] 运行 storage、local_api、media 检查及前端类型检查，用全新目录启动真实 App。
 
-测试使用 `.local-cache/` 下实际 SQLite 文件：
-
-```rust
-let store = Store::open(&database_path).await?;
-let project = store.create_project("account-a", "项目一").await?;
-let session = store.create_session("account-a", "request-a").await?;
-store.move_session("account-a", &session.id, Some(&project.id)).await?;
-assert!(store.get_session("account-b", &session.id).await.is_err());
-drop(store);
-let reopened = Store::open(&database_path).await?;
-assert_eq!(reopened.list_projects("account-a").await?[0].name, "项目一");
-```
-
-- [x] 编写测试并确认缺失数据库及业务实现时失败。
-- [x] 实现迁移、账号范围、创建、分页、移动、重命名和删除。
-- [x] 验证重复请求不会创建重复会话；跨账号访问被拒绝。
-- [x] 运行项目、会话对应的集成检查；筛选命令为 `cargo test --manifest-path src-tauri/Cargo.toml --test integration storage::`。
-- [x] 实现清空会话，并验证资产与项目资产的保留规则。
-
-## 任务 3：前端本地传输与桌面路由
-
-文件：`src/lib/api/client.ts`、`src/lib/desktop.ts`、`src/lib/agui-websocket-agent.ts`、`src/routes/`、`src-tauri/src/commands.rs`、`src-tauri/src/menu.rs`、`src-tauri/capabilities/default.json`。
-
-接口：前端 API 函数通过本地传输保留原有调用数据。Rust 命令校验操作、账号与参数；原生菜单打开模型、技能和 MCP 的已有配置页面。Studio 页面不执行后台初始化。
-
-- [x] 编写真实 IPC 调用检查，断言创建项目后列表可以读到对应记录。
-- [x] 实现命令与路由承接，账号错误保留现有 `ApiError` 语义。
-- [x] 使用 Channel 提供运行事件订阅，保留聊天组件接受的 AG-UI 事件。
-- [x] 核对 DOM、路由和类名，运行类型检查及前端构建。
-
-## 任务 4：资产与流程图
-
-文件：`src-tauri/src/assets.rs`、`src-tauri/src/library.rs`、`src-tauri/src/flow.rs`、`src-tauri/tests/assets.rs`、`src/lib/api/studio.ts`。
-
-接口：资产、版本、项目资产、分类、标签、重复内容、筛选和流程图继续返回当前 Studio 数据结构。资产内容由本地文件提供，元数据与引用由 SQLite 管理。
+检查代码使用新签名：
 
 ```rust
-let asset = store.import_asset("account-a", &session_id, &input_path).await?;
-let bytes = store.read_asset("account-a", &asset.id, &asset.version_id).await?;
-assert_eq!(bytes, std::fs::read(&input_path)?);
-assert!(store.read_asset("account-b", &asset.id, &asset.version_id).await.is_err());
+let project = store.create_project("角色与分镜").await?;
+let first = store.create_session("request-one").await?;
+let again = store.create_session("request-one").await?;
+assert_eq!(first.id, again.id);
+assert_eq!(store.list_projects().await?[0].id, project.id);
 ```
 
-- [x] 测试实际文件导入、文本版本、引用、删除与重新启动后的读取。
-- [x] 实现本地资源 URL、媒体范围读取和原生导出。
-- [x] 实现资产库操作及流程图节点、边和位置保存。
-- [x] 验证越界路径、引用版本和删除事务；筛选命令为 `cargo test --manifest-path src-tauri/Cargo.toml --test integration assets::`。
-- [x] 实现视频封面、调色盘和未引用文件清理，并验证实际文件。
+**通过条件：** 无账号参数与平台 Client 的本地业务可以运行；项目、会话和媒体经过真实读写；没有启动身份请求。
 
-## 任务 5：平台账号与本地设置
+## 任务 2：本地技能、专家、MCP 与原有业务
 
-文件：`src-tauri/src/platform.rs`、`src-tauri/src/credentials.rs`、`src-tauri/src/settings.rs`、`src-tauri/tests/platform.rs`、`src/lib/api/operations.ts`。
+**修改：** `skills.rs`、`experts.rs`、`expert_runtime.rs`、`expert_cards.rs`、`expert_tasks.rs`、`mcp.rs`、`mcp_execution.rs`、`mcp_inputs.rs`、`settings.rs`、`models.rs`；`src/features/agent-assets/`、`src/features/studio/studio-market.tsx`、技能、专家与设置入口。
 
-接口：`PlatformClient` 通过 reqwest 和 Cookie 库访问现有 `/api/v1/studio/auth/*`；API Key、平台 Cookie 与 MCP 凭据保存到系统凭据存储。模型与连接器设置只修改本地配置。
+**测试：** `tests/skills.rs`、`experts.rs`、`settings.rs`、`assets.rs`、`library.rs`、`runs.rs`、`agent.rs`。
 
-- [x] 用真实平台地址验证账号接口，记录未配置验证环境时的明确错误。
-- [x] 实现注册开关、登录、身份、密码、资料和退出登录。
-- [x] 实现账号切换的数据范围与连接关闭，验证前端缓存清除。
-- [x] 实现本地模型与 MCP 设置的保存、读取、启停和凭据更新。
-- [x] 验证密钥不出现在 DTO、数据库普通配置和日志中。
+**接口：** 继续通过 `LocalApi::request` 维护技能、专家、模型和 MCP。对象只引用本地 ID 与具体版本，头像引用本地资产。
 
-## 任务 6：Rig 模型与持久 Agent 运行
+- [ ] 为实际技能目录、ZIP 导入、历史版本与专家 SOP 编写直接本地读写检查，运行并记录依赖缺失的失败结果。
+- [x] 将列表与编辑入口连接到本地管理，移除目录获取、发布状态、平台资源 URL 与相关查询。
+- [ ] 保留技能文件、专家版本、步骤、模型协议、工具审批、上下文、轨迹和 MCP 继续执行能力。
+- [x] 对项目、资产、文档版本、预览、导出和批量操作执行已有真实存储检查；更新账号相关的调用与断言。
+- [ ] 使用实际对话模型与独立 MCP 服务验证工具发现、凭据错误、审批与连接释放；结果未知时拒绝重复执行。
 
-文件：`src-tauri/src/models.rs`、`src-tauri/src/agent.rs`、`src-tauri/src/events.rs`、`src-tauri/src/approvals.rs`、`src-tauri/src/context.rs`、`src-tauri/tests/agent.rs`。
-
-接口：每次运行生成 `run_id`，保存消息、事件顺序与 Rig 检查点；会话内顺序执行，不同会话可并发。工具调用经过审批与参数检查，运行通过 Channel 提供 AG-UI 事件。
+技能版本检查直接比较文件内容：
 
 ```rust
-let pending = store.pending_approval("account-a", &run_id).await?;
-drop(store);
-let reopened = Store::open(&database_path).await?;
-assert_eq!(reopened.pending_approval("account-a", &run_id).await?.id, pending.id);
-assert!(reopened.resolve_approval("account-b", &pending.id, true).await.is_err());
+assert_eq!(std::fs::read(&exported_skill_file)?, original_skill_bytes);
+assert_eq!(bound_skill_version, version_before_edit);
+assert_eq!(pending_tool_call_id, restored_tool_call_id);
 ```
 
-- [x] 验证审批等待、批准、拒绝、参数修改、重新启动和重复答复。
-- [x] 验证未知工具和工具结果未知时的恢复行为。
-- [x] 使用发布版本的 Rig API 实现三种模型协议及真实连接测试。
-- [x] 实现流式正文、reasoning、工具输入、工具输出与用量事件。
-- [x] 验证启用图片能力时的三种协议思考内容、流式与非流式事件，以及重新打开数据库后的检查点读取。
-- [x] 实现图片用量估算、上下文图片元数据和原始字节发送，三种协议通过流式与非流式真实图片颜色识别与预算检查。
-- [x] 实现上下文选择与压缩、取消、重试、中断状态及检查点恢复。
-- [x] 在账号认证和会话订阅后恢复排队运行；账号变化时关闭旧订阅并终止旧账号的运行。
-- [x] 验证工具结果未知时禁止自动重复执行。
-- [x] 对真实模型运行完整对话与工具调用，验证数据库和 UI 事件一致。
+**通过条件：** 本地创建的技能和专家可在真实会话使用，既有媒体、审批与 MCP 功能通过对应检查。
 
-## 任务 7：技能、专家与 MCP
+## 任务 3：工作流定义、草稿与版本
 
-文件：`src-tauri/src/skills.rs`、`src-tauri/src/experts.rs`、`src-tauri/src/publications.rs`、`src-tauri/src/platform/publications.rs`、`src-tauri/src/mcp.rs`、`src-tauri/tests/capabilities.rs`、`src/lib/api/agent-assets.ts`。
+当前进度：`workflow_definitions.rs`、独立业务表与本地 API 已实现，4 项真实数据库和接口检查通过；原附件已保存为版本并由独立 Go Agent 成功执行。页面复制和会话调用分别继续按任务 7、任务 8 处理。
 
-接口：官方目录通过平台账号接口读取，获取内容后保存版本与摘要。个人修改与官方来源分别记录。MCP 使用 rmcp 发现与调用工具，权限在本地检查。
+**修改：** `src-tauri/src/workflows.rs`、`workflow_inputs.rs`、`local_api.rs`、`lib.rs` 与本地 SQL 结构。
 
-- [x] 测试技能文件路径、导入内容、版本与运行绑定不随目录更新变化。
-- [x] 实现个人技能读取、编辑、ZIP 导入、版本记录与运行中的文件读取。
-- [x] 获取官方技能并保存版本、来源地址和内容摘要，检查重复获取与只读权限。
-- [x] 实现个人专家编辑、内容校验、版本记录与会话中的专家和本地模型绑定。
-- [x] 实现官方专家获取与本地默认模型选择，随会话保存完整模型配置。
-- [x] 实现专家任务、步骤、输入卡片、结果卡片与响应恢复。
-- [x] 实现专家头像上传、按版本读取与平台头像鉴权读取。
-- [x] 统一个人专家列表、详情与绑定版本运行的依赖检查；未获取 MCP 工具时显示不可用。
-- [x] 实现真实 MCP 服务连接、发现、调用和连接释放。
-- [x] 保留 MCP 标准图片内容与完整原始响应，验证图片转换和格式错误时的持久保存。
-- [x] 实现 MCP 补充输入与持久恢复。
-- [x] 验证审批、凭据错误与服务错误正常终止对应操作。
-- [x] 实现个人技能和专家的发布同步与发布记录。
+**新增：** `src-tauri/tests/workflow_definitions.rs`、`src/lib/api/workflows.ts`；在 `tests/integration.rs` 中注册检查模块。
 
-## 任务 8：远程工作流
+**接口：**
 
-文件：`src-tauri/src/workflows.rs`、`src-tauri/tests/workflows.rs`、`src/lib/api/workflow-market.ts`。
+| 本地请求 | 内容 |
+| --- | --- |
+| `GET /api/v1/studio/workflows` | 名称、类型、分类与启停筛选 |
+| `POST /api/v1/studio/workflows` | 名称、说明、分类、标签与完整草稿 |
+| `GET/PATCH/DELETE /api/v1/studio/workflows/{id}` | 读取、按修订保存、引用检查后删除 |
+| `GET/POST /api/v1/studio/workflows/{id}/versions` | 版本列表、创建不可变版本 |
+| `GET /api/v1/studio/workflows/{id}/versions/{version_id}` | 取得指定版本 |
+| `POST /api/v1/studio/workflows/{id}/default-version` | 设置默认版本 |
 
-接口：使用已有 `run_workflow` 与 `get_task`，按 MCP 凭据保存任务身份、输入、`task_id`、状态与结果。本地会话不创建对应云端 Studio 会话。
+草稿结构与两类 `execution` 字段遵循设计第四节。PATCH 接收 `expected_revision`，版本创建接收版本号和当前草稿修订。
 
-- [x] 测试保存远程任务后重新启动只查询原任务，不重复提交。
-- [x] 实现官方工作流目录、输入要求、指定版本保存与专家会话中的能力列表。
-- [x] 为已保存目录的工作流保存输入等待、卡片与跳过决定，验证重新启动和重复答复。
-- [x] 完成表单提交校验、字节输入、远程任务提交和状态查询。
-- [x] 下载真实任务结果，创建本地资产版本及流程图引用。
-- [x] 将远程工作流和输出关联到具体专家步骤，并验证步骤继续执行。
-- [x] 实现提交结果未知状态与任务列表核对，取消本地运行不伪称取消远程计算。
-- [x] 使用真实平台 MCP 工作流验证输入、任务和结果。
+- [ ] 使用实际 ComfyUI JSON 与在线模型定义编写保存、重新读取、版本不可变、修订冲突和无效绑定检查。
+- [ ] 执行 `cargo test --manifest-path src-tauri/Cargo.toml --test integration workflow_definitions::`，记录当前缺失接口的失败结果。
+- [ ] 实现有类型的工作流定义、输入 Schema、输入输出绑定、草稿、版本、默认版本与启停检查。
+- [ ] 将原字段类型、图参数位置、输出位置与 Rust 检查逐项核对，错误必须指向具体输入或绑定。
+- [ ] 实现对应本地 API 与 TypeScript DTO，DTO 中的执行类型必须为可区分联合类型。
+- [ ] 重新打开真实数据库，确认原版本内容摘要与定义保持一致。
 
-## 任务 9：安装包、平台入口与交付检查
+核心断言使用完整保存对象：
 
-文件：`src-tauri/tauri.conf.json`、`README.md`、`docs/verification.md`；Pixoma 的 `web/admin/src/config/menu.ts` 与实际产品链接所在文件。
+```rust
+assert_eq!(saved_version["content_digest"], reread_version["content_digest"]);
+assert_eq!(reread_version["definition"]["type"], "comfyui");
+assert!(invalid_input_result.is_err());
+assert!(stale_revision_result.is_err());
+```
 
-- [x] 移除平台 Studio 菜单与搜索入口，保留 `studio-operations` 和平台服务。
-- [x] 保存平台地址并支持无启动环境变量的原生窗口启动；安装包构建要求提供平台地址。
-- [ ] 验证原有前端功能清单与设计第 15 节各项要求。
-- [x] 运行 `cargo fmt --check`、`cargo clippy --all-targets -- -D warnings`、`cargo test`。
-- [x] 运行前端类型、行为测试与构建，运行 `pnpm tauri build`。
-- [ ] 启动真实安装包，验证登录、项目、聊天、资产、工作流、退出和重新启动。
-- [x] 记录运行命令、测试结果、平台环境与未获得证据的要求；未验证项不能记为通过。
-- [x] 检查新目录独立构建与文件引用，审查变更并提交实际完成的内容。
+**通过条件：** 两类定义都可管理与固定版本，输入检查在创建外部执行之前完成。
 
-## 执行记录
+## 任务 4：Rust 执行记录、计算节点与文件接口
 
-- 2026-10-18：设计已批准；独立工程位于 `/Users/mr9esx/Documents/PixomaStudio`，由主会话按计划顺序执行。
-- 2026-10-18：独立工程构建与项目、会话的真实 SQLite 测试通过。前端保留 Studio 页面，桌面工程使用独立依赖。pnpm 命令需要 Node.js 22 的目录位于 PATH 首位。
-- 2026-10-18：本地命令使用已认证的平台身份；账号 Client 与命令联调采用独立测试平台。
-- 2026-10-18：资产库分类、标签、筛选、分组、独立版本、批量操作、复制、引用、导出和流程图已接入本地请求。文件上传使用二进制 IPC；媒体读取检查账号并支持 Range。实际文件、SQLite、ZIP 和并发重复请求测试已执行。
-- 2026-10-18：模型与 MCP 配置保存在本地，密钥使用系统凭据存储。真实 macOS 凭据读写检查已通过。Rig 三种协议与 rmcp 工具发现已接入，连接失败检查使用实际网络请求。
-- 2026-10-18：运行记录保存 Rig 检查点、模型快照和连续事件序号；已验证并发重复消息、会话内的执行顺序和重新启动后的中断处理。桌面单进程运行检查已通过，验证范围记录于 `docs/verification.md`。
-- 2026-10-18：真实平台账号流程、系统登录状态恢复、MCP 初始化与工具发现通过。原生窗口已验证真实模型的流式与非流式回复、连续对话、较大 Channel 消息、事件续接、取消、输出限制、文档读取与 Range。
-- 2026-10-18：平台菜单与快捷搜索已移除 Studio 产品入口，菜单配置 5 项检查与浏览器 7 项检查通过。
-- 2026-10-18：账号变化清除前端业务缓存并重新创建页面状态；原生窗口验证账号切换的数据隔离和运行取消。账号认证与运行订阅恢复排队记录，实际数据库重新启动检查通过。
-- 2026-10-18：清空会话检查确认文字，停止当前账号的运行并关闭订阅；项目、资产文件、版本、项目资产和使用记录保留，已经清空的会话标记为不可打开。真实 SQLite 与原生窗口检查通过。
-- 2026-10-18：模型思考设置通过 Rig 传递，DeepSeek Chat 使用 Rig 的 DeepSeek 协议适配；关闭思考的实际流式请求、较大非流式回复和输出限制检查通过。
-- 2026-10-18：Agent 工具支持会话资产列表、文本读取、文档创建和文档版本更新。工具定义、调用、参数、审批与结果独立保存；参数使用 JSON Schema 校验，工具结果与 AG-UI 事件在同一个事务保存。
-- 2026-10-18：真实模型验证工具创建文档、审批等待、数据库重新打开、批准、拒绝、修改参数和重复答复。会话记录保留工具调用与结果标识，原生窗口验证 AG-UI 审批暂停与恢复。
-- 2026-10-18：原生窗口通过真实模型调用平台 MCP 的 `list_workflows`；连接器的审批策略在 `full_access` 下继续生效。MCP 工具定义与连接信息绑定到运行，执行前检查连接启停、调用策略、地址和凭据引用。
-- 2026-10-18：所选资产引用绑定指定版本，并随消息和运行在同一事务保存；文本资料进入 Rig 的持久消息。真实模型验证其他会话的旧版本资料和连续对话，跨账号引用在创建运行之前被拒绝。
-- 2026-10-18：上下文与运行轨迹接口读取实际保存的请求、回复、工具调用、参数、结果和服务用量。文本 Token 估算使用 `cl100k_base`；实际用量分别记录服务返回的字段，缺失用量保留为空值。
-- 2026-10-18：较长资料通过真实模型生成摘要，按账号、会话、模型与资料内容保存缓存。三种协议均通过指定编号、备用编号、数据库重新打开、摘要复用、输入用量、原始文件完整性，以及当前消息超限时禁止发送请求的检查。
-- 2026-10-18：Rust 集成检查统一使用 `tests/integration.rs`，各类检查保留在各自模块；Cargo 通过显式测试目标收集检查项目。
-- 2026-10-18：真实模型生成文档工具调用，批准后实际创建文件，在保存结果之前关闭数据库；重新打开后标记工具结果未知，重复执行被拒绝，资产与版本均保留一份。未知工具名称被明确拒绝。
-- 2026-10-18：个人技能的实际 SQLite 与 ZIP 检查通过，覆盖目录路径、文件冲突、文件大小、内容校验、历史版本与启停。真实模型使用 `load_skill` 读取运行中保存的版本；修改并停用当前技能后，重新打开数据库仍读取原版本。
-- 2026-10-18：真实平台验证官方技能详情、重复获取、来源地址、版本保存和只读权限；账号注册、资料、密码和登录状态恢复检查通过。
-- 2026-10-18：个人专家版本与指定本地模型绑定到会话；真实模型验证旧版本提示词、重新启动后的读取、连续消息以及更换专家版本时的拒绝行为。
-- 2026-10-18：专家卡片验证开始、暂缓、跳过、确认与修改；并发重复答复返回同一运行，过期卡片被拒绝。真实模型保存文档及后续版本，结果卡片引用对应的实际资产版本。
-- 2026-10-18：官方专家使用创建会话时的本地默认模型，并保存完整配置与凭据引用。真实平台和模型验证更换默认配置、修改原配置和密钥之后，已有会话继续使用创建时的配置；清空会话后清理不再引用的旧凭据。
-- 2026-10-18：专家会话返回绑定版本的技能列表；编辑器引用列表包含个人技能。头像上传使用二进制 IPC，本地与平台头像均验证实际图片内容，原生窗口验证上传、读取、个人技能引用和账号隔离。
-- 2026-10-18：失败、取消与输出受限的运行参与后续历史读取；已保存正文与实际工具结果继续保留，工具结果未知使用明确的错误状态说明，并经过 Rig 的历史消息完整性检查。真实模型验证输出受限后的原用户消息与已生成正文。
-- 2026-10-18：工作流目录保存来源地址、版本、输入要求与内容摘要；同一版本内容变化被拒绝。真实平台和 MCP 验证重新打开数据库后的读取、专家引用的能力列表、技能与工作流准备，以及 MCP 尚未发现工具和停用时的不可用状态。
-- 2026-10-18：个人专家列表和详情共用依赖检查。实际 SQLite 验证技能停用、模型停用、模型工具能力变化，以及最新专家版本不可用时，已有会话继续使用其原绑定版本。
-- 2026-10-19：排队执行、普通回复和上下文压缩在请求前检查模型启停；模型保存、快照建立和会话清理共用并发保护。真实系统凭据检查验证并发保存和普通会话旧凭据清理，代码审查复查通过。
-- 2026-10-19：真实 MCP 验证错误凭据被拒绝、查询不存在的任务返回服务错误，后续工作流目录查询仍可执行。
-- 2026-10-19：平台地址保存到应用配置目录，使用原子文件替换。原生窗口连续两次读取真实平台注册设置，第二次启动没有 `PIXOMA_PLATFORM_URL`；配置格式、地址校验和构建地址初始化检查通过。
-- 2026-10-19：真实模型请求已引用工作流但缺少必填输入时，保存输入卡片并暂停本地运行。实际 MCP 和数据库验证重新启动、必填输入拒绝、账号范围、并发重复跳过及卡片结束状态；远程任务提交和结果处理继续实施。
-- 2026-10-19：审批展示与答复保留当前有效参数；真实模型检查验证填写工作流输入后修改 MCP 审批策略，参数继续保留。原生窗口通过工作流审批、输入等待、跳过、会话记录，以及原有聊天、资产、账号切换和清空会话检查。
-- 2026-10-19：官方 ComfyUI 0.41.3 与真实 Edge Agent 连接隔离测试平台，通过 MCP 提交图片处理任务。检查覆盖未引用目录的输入表单、本地图片字节、运行中重新打开数据库后查询原任务、原图与反色图片的尺寸及像素、两个结果的资产保存、输入资产引用和流程图连线。
-- 2026-10-19：本地取消等待后保留真实远程任务状态，会话可以继续调用模型，远程结果仍能导入。输出逐个保存到执行记录与流程图，页面刷新与执行循环并发查询时，输出数量保持增加；工具结果、消息、事件与运行状态共用事务。
-- 2026-10-19：真实专家开始步骤后执行图片工作流，工作流与两个资产版本保存到对应处理记录；结果确认卡片与用户确认后的任务完成检查通过。真实步骤状态检查验证开始前和跳过后均拒绝写入工具。
-- 2026-10-19：专家系统说明包含会话固定版本的提示词与完整 SOP。真实失败工作流验证远程计算结束后，处理记录与步骤保存失败状态；已跳过或完成的步骤受到保护。
-- 2026-10-19：通过 SQLite 触发器检查真实远程任务提交成功后，本地任务编号无法保存的情况。提交结果保存为未知，当前凭据的同一工作流任务保存为核对候选；重复执行被拒绝，重复核对不会自动选择任务。MCP 连接使用本次校验通过的凭据引用，代码审查复查通过。
-- 2026-10-19：工作流输出根据真实字节和 MIME 保存文件格式，实际 JSON、文本和二进制文件检查通过。图片版本保存本地调色盘，真实双色图片、纯白图片、重新分析、账号范围和重新打开数据库检查通过；图片分析与重试代码审查通过。独立工程 README 已保存启动、配置、检查与构建命令。
-- 2026-10-19：FFmpeg 9.0.2 使用官方发布源码与固定 SHA-256 构建，官方签名校验通过。视频封面、尺寸、调色盘、重新分析、账号范围、无效视频与重新启动读取检查通过。封面与原始文件在同一事务保存；启动清理保留全部历史版本及封面，实际检查覆盖写入中断、并发保存和符号链接。应用目录通过标准库文件锁保护，真实子进程验证互斥与释放；临时文件清理在取得锁之后执行。48 项常规 Rust 检查及前端类型、5 项行为检查与构建通过。
-- 2026-10-19：图片按实际尺寸和模型图片规则独立估算，保留原始图片字节；三种协议通过真实双色图片识别、预算、服务用量、持久引用，以及启用图片能力时的流式和非流式思考内容检查。MCP 标准图片以独立内容块传递，转换错误保留完整原始响应和明确结束状态，实际 SQLite 重新打开检查通过。52 项常规 Rust 检查通过。
-- 2026-10-20：三种协议分别通过流式与非流式真实图片识别，以及启用图片能力后的资料压缩、摘要缓存恢复和输入限制检查。结果保存调整后，真实 ComfyUI 与 Edge Agent 的完整工作流检查通过，覆盖两个实际输出、重新启动恢复、专家步骤、取消后继续对话、计算失败与提交结果未知。
-- 2026-10-21：55 项常规 Rust 检查通过。官方 SDK TaskDemo 验证重新打开数据库后继续查询原任务并取得实际计算结果；官方 SDK enum form 验证等待 301 秒后连续提交四项输入、真实服务返回结果、Channel 事件与重新打开数据库。实际 SQLite 与 CancellationToken 验证服务撤销输入、排队输入取消、完整工具响应保存和继续事件。前端 5 项检查、构建和类型检查通过。真实平台、模型、ComfyUI 和 Edge Agent 的完整工作流检查通过，耗时 95.95 秒。
-- 2026-10-21：个人技能和专家通过平台 Studio 用户接口发布与撤销发布，按账号保存对象关联、发送内容、请求编号和实际发布记录。真实检查通过并发重复请求、历史版本发布、新版本编辑后保持发布状态、模型和技能引用转换、真实头像字节、完整技能包与二进制内容。实际 SQLite 触发器验证平台对象创建成功和发布成功后的本地保存中断，重新打开数据库后恢复原对象与原请求，没有重复对象或发布记录。纯文本首尾空白和专家空名称引用检查通过，本地版本保留原文；代码审查复查未发现确定问题。
-- 2026-10-21：原生窗口完整检查通过个人技能和专家发布、重复请求、撤销发布、真实资料压缩、摘要复用、收到正文后的取消、取消后的连续对话，以及输出限制后的连续对话。项目、文档、Range、AG-UI、审批、MCP、工作流输入、账号切换和清空会话检查同时通过。另通过两个独立 App 进程验证重新启动：第二次启动没有平台地址、账号密码和模型配置环境变量，读取保存的账号、项目、原始资料和摘要，继续原审批运行；批准之前没有文档，批准后只有一份文档，重复批准不重复执行。每个阶段核对独立启动编号和实际成功结果；目录锁占用时启动的真实子进程没有形成成功结果，其他启动编号也不能读取已有成功结果，代码审查复查通过。
-- 2026-10-21：`CI=true PIXOMA_PLATFORM_URL=http://127.0.0.1:18082 pnpm tauri build --ci` 完整通过，生成 macOS ARM64 的 `.app` 和 `.dmg`。应用采用 ad-hoc 签名，应用和随包 FFmpeg 的签名完整性、DMG 校验和及镜像内应用签名检查通过。复制出的安装包在没有平台地址环境变量时启动，保存内置平台地址，并通过实际页面完成登录、项目创建和文档创建。安装包模型调用因系统凭据授权失败而结束，尚未记为通过。页面操作清单保存在 `docs/frontend-checklist.md`。
-- 2026-10-21：使用系统访问限制禁止读取 Pixoma 原工程目录，校准检查确认原工程文件读取被拒绝。相同限制下，锁定依赖安装、FFmpeg 准备、前端构建、类型检查、Rust 发布编译、应用签名和 DMG 生成全部通过；源码与资源目录没有符号链接。Agent、工具审批、上下文、资产筛选、资产批量操作及本地 API 测试文件的格式检查通过；55 项常规 Rust 检查和 Clippy 全目标检查通过。
-- 2026-10-21：全部 Rust 文件的默认格式检查通过。完整 Rust 回归编译耗时 7.36 秒，55 项通过、22 项跳过、0 项失败；Clippy 全目标检查通过，耗时 5.36 秒。前端 5 项测试、类型检查与构建通过。安装包页面操作需要系统解锁，真实模型调用需要完成系统钥匙串授权。
-- 2026-10-21：当前源码重新生成完整安装包，发布编译耗时 1 分 37 秒，命令退出码为 0。应用、随包 FFmpeg、DMG 校验和、镜像内应用及复制出的应用均通过完整性检查；当前 DMG 的 SHA-256 和安装副本位置记录在 `docs/verification.md`。源码目录没有符号链接，依赖声明和业务源码没有引用 Pixoma 原工程的路径。
-- 2026-10-21：独立目录建立本地 Git 仓库，分支为 `codex/desktop-studio`。应用与验证资料提交为 `1aec1df`，author 和 committer 均为 `李卓洲 <1138099359@qq.com>`。构建产物、缓存、依赖目录和本地配置按 `.gitignore` 忽略；尚未通过的页面及真实服务检查继续保留待验证状态。
-- 2026-10-21：安装副本重新启动后读取原账号、项目和文档，通过文档重命名、评分、标签、实际图片和视频导入、修改日期、项目归属、图片放大与详情、视频封面及播放检查。单项导出、取消保存和批量 ZIP 导出通过原生对话框执行，中文文件名与解压后原始字节检查通过；视频时间定位保留待验证。原安装副本正常退出，退出码为 0；最新安装副本打开同一独立数据目录，恢复登录凭据需要系统钥匙串授权。
+当前进度：`compute_nodes.rs`、`executions.rs`、`edge_api.rs` 已提供节点管理、presence、领取、任务包、输入下载、心跳、事件、结果流式上传与完成确认；重复请求、领取互斥、事件冲突、结果去重和重新打开读取已有真实 HTTP 检查。完整生命周期和其他中断阶段尚在实施。
+
+**修改：** `workflow_execution.rs`、`assets.rs`、`file_transfer.rs`、`desktop_state.rs`、`commands.rs`、`local_api.rs`、`lib.rs`、`Cargo.toml` 与 SQL 结构。
+
+**新增：** `src-tauri/src/compute_nodes.rs`、`edge_api.rs`、`execution_files.rs`；`tests/compute_nodes.rs`、`execution_recovery.rs`。
+
+**接口：**
+
+- `/api/v1/studio/compute-nodes` 及 `/{id}` 管理节点，`/{id}/credential` 生成或重置凭据。
+- `POST /api/v1/studio/workflow-executions` 接收 `request_id`、`workflow_id`、`version_id` 或明确的草稿测试修订、`inputs` 与可选会话关系。
+- `GET /api/v1/studio/workflow-executions` 支持按工作流与会话读取；`/{id}` 返回实际执行，`/{id}/cancel` 与 `/{id}/stop-waiting` 分别处理取消和会话等待。
+- `/agent/v1` 的路径、字段、协议版本、序号与文件确认规则遵循设计第六节；JSON 参数使用 serde 校验。
+
+- [ ] 启动实际 Axum Router 与 SQLite，编写节点凭据、领取互斥、重复请求、事件冲突、文件流、输出去重与取消竞争检查。
+- [ ] 执行对应检查并记录接口缺失时的失败结果。
+- [ ] 实现执行快照、节点指定、事务领取、单个 Agent 单执行、状态与连接健康的分别保存。
+- [ ] 实现 10 秒心跳、35 秒连接异常判定与原尝试恢复；断线不产生新尝试。
+- [ ] 实现实际输入下载、Range、摘要与长度检查、流式结果上传、输出确认和最终资产导入。
+- [ ] 验证相同 `request_id` 与相同内容取得同一执行，内容变化返回冲突；相同输出上传多次只有一个资产版本。
+- [ ] 验证服务监听失败返回明确错误，没有随机端口替代；远程监听按明确配置启用。
+
+核心一致性断言：
+
+```rust
+assert_eq!(first_execution["id"], repeated_execution["id"]);
+assert_eq!(claimed_count_for_execution, 1);
+assert_eq!(asset_versions_for_output, 1);
+assert_eq!(std::fs::read(&saved_output_path)?, uploaded_bytes);
+```
+
+**通过条件：** 实际 HTTP 请求完成领取、文件与状态操作；重复操作与进程重启保持同一执行和输出。
+
+## 任务 5：独立 Go Edge Agent 与 ComfyUI
+
+当前进度：独立 module 已建立，实际 SQLite 日志、跨进程目录互斥、提交阶段、原编号恢复、输入下载、ComfyUI 提交、历史查询与输出上传已接入。原附件在 `Linux-ComfyUI` 生成结果，并通过服务与 Agent 提交后重启检查；Agent 在 Linux 上部署和其余中断阶段尚待验证。
+
+**源文件：** Pixoma 的 `apps/edge-agent/`、`internal/tasks/infrastructure/comfyui/`、`actuator/job.go`、`worker.go`、实际使用的硬件与指标类型。
+
+**目标文件：** `apps/edge-agent/go.mod`、`cmd/edge-agent/main.go`、`internal/application/`、`internal/controlplane/`、`internal/comfyui/`、`internal/collect/`、`internal/journal/` 与对应检查文件。
+
+**接口：** Go module 使用 `github.com/Mr9esx/PixomaStudio/apps/edge-agent`。配置保留 `CONTROL_PLANE_URL`、`EDGE_ID`、`AGENT_TOKEN`、`COMFYUI_BASE_URL`，增加 `EDGE_DATA_DIR`。结构化日志清除凭据。任务包直接采用设计第六节的 JSON 字段。
+
+- [ ] 将 ComfyUI Client、采集与执行所需代码复制到独立 module，核对全部 import 与依赖许可证。
+- [ ] 编写真实 SQLite 日志检查，覆盖目录锁、提交意图、编号保存、事件序号、结果确认和重新打开读取；执行检查并记录失败结果。
+- [ ] 实现 Studio HTTP 文件传输与事件上报，移除平台 Blob、Topic Publisher 与原工程内部包依赖。
+- [ ] 保存提交阶段与实际 `prompt_id`，恢复时查询原任务，响应未知时核对关联标识；无法唯一核对则停止再次提交。
+- [ ] 使用实际 ComfyUI 验证输入上传、图参数替换、实际输出、进度和定向取消能力。
+- [ ] 在结果上传前、部分输出确认后、最终确认前分别终止并重新启动 Agent，核对结果字节与执行次数。
+- [ ] 在独立远程机器运行相同检查，确认 Studio 与 Agent 没有共享素材目录。
+- [ ] 执行 `go test ./...`、`go test -race ./...`、`go vet ./...` 与 `go build ./cmd/edge-agent`；设置 `GOTMPDIR`、`TMPDIR` 和 `GOCACHE` 到 `.local-cache/` 下的相应目录。
+
+恢复检查必须核对实际编号：
+
+```go
+if resumed.PromptID != beforeRestart.PromptID {
+    t.Fatalf("恢复执行的 prompt_id 发生变化")
+}
+if !bytes.Equal(uploadedOutput, comfyOutput) {
+    t.Fatalf("上传结果与 ComfyUI 输出不一致")
+}
+```
+
+**通过条件：** 本机与远程实际执行均完成，Agent 独立构建，原执行恢复不重复提交。
+
+## 任务 6：Seedream 与 MiniMax 生成服务
+
+**新增：** `src-tauri/src/generation/mod.rs`、`seedream.rs`、`minimax.rs`、`src-tauri/tests/generation.rs`、`src/lib/api/generation.ts`。
+
+**修改：** `workflow_execution.rs`、`local_api.rs`、`lib.rs`、`assets.rs`、`media.rs` 与连接修订结构。
+
+**接口：** `/api/v1/studio/generation-connections` 及 `/{id}` 管理连接，`/{id}/test` 验证连接；`GET /api/v1/studio/generation-providers` 返回内置服务、操作与模型系列能力。执行入口统一使用 `workflow-executions`。
+
+- [ ] 编写真实数据库检查，覆盖连接修订、凭据不进入 DTO、模型能力与参数校验；运行并记录失败结果。
+- [ ] 实现 `provider` 与 `operation` 枚举分派，固定 Seedream 图片与 MiniMax V2 视频的请求和响应结构。
+- [ ] 根据官方文档实现提示词、参考素材、尺寸、时长、比例、模型能力与组合校验；不支持的字段在提交前返回错误。
+- [ ] Seedream 保存响应输出与逐项错误；MiniMax 保存 `task_id`、实际状态与用量并查询原任务。
+- [ ] 实现连接修订绑定、限流等待、查询恢复、输出下载与资产导入；生成请求不自动重发。
+- [ ] 普通取消只取消尚未提交的在线执行；已提交 MiniMax 提供停止等待，保持后续查询和结果保存。
+- [ ] 使用明确配置的真实服务分别完成实际图片与视频生成，记录请求编号、任务编号、格式、尺寸、摘要与实际用量。
+- [ ] 验证参数拒绝、连接错误、查询中断与下载重试；用实际进程中断验证已知编号的恢复。无法制造并核对的异常保持未验证状态。
+
+实际输出检查：
+
+```rust
+assert_eq!(restored_execution["remote_task_id"], original_task_id);
+assert!(actual_output_path.is_file());
+assert_eq!(execution_output["asset_version_id"], actual_asset_version_id);
+assert!(public_connection.get("credential").is_none());
+```
+
+**通过条件：** 两个生成服务的真实输出进入资产库，查询与保存重试不会创建新生成任务。
+
+## 任务 7：原页面复制、设置与两类工作流
+
+当前进度：原工作流编辑、JSON 导入、输入输出、介绍、媒体预览、版本列表与共享表格组件已加入 Studio，并连接本地工作流及执行 API。节点列表、表单和规格区域已加入设置；编辑状态由工作区保留。前端 11 项检查、类型检查与构建通过。原附件在真实桌面页面导入、绑定、选择节点、保存、运行并显示 1024 × 1024 图片通过。在线模型表单、节点部署和指标继续处理。
+
+**源文件与目标：** 按设计第十一节清单复制工作流、字段、图预览、版本、节点详情、部署、指标及其实际 import 依赖。
+
+**修改：** `src/features/cases/`、`src/features/edges/`、`src/features/studio/studio-sidebar.tsx`、`studio-workspace.tsx`、`studio-settings.tsx`、`studio-settings-layout.tsx`、工作流列表与详情路由、`src/lib/api/`。
+
+**接口：** 使用任务 3、4、6 提供的本地 DTO 和能力数据。工作流类型使用 `comfyui | online`，节点引用为一个 `node_id`。
+
+- [ ] 记录实际来源组件与依赖清单，连同样式、图标和 i18n 文案复制到 Studio；检查现有目标文件内容后合并修改。
+- [ ] 工作流列表按执行类型筛选，分类独立筛选；创建时选择类型，详情配置按类型显示。
+- [ ] 保留 ComfyUI 导入、图预览、字段生成、绑定、介绍、示例、版本与草稿测试，执行目标改为单个节点。
+- [ ] 将节点管理嵌入设置，保留节点采集、硬件、指标与部署功能；移除 Topic、订阅和任务队列设置。
+- [ ] 在现有表单组件中组合生成服务与模型参数，按后端能力显示字段、错误与取消操作。
+- [ ] 草稿在进入节点或生成服务设置前保存到页面编辑状态，返回后完整恢复；取消编辑不修改已保存定义。
+- [ ] 使用实际本地后端核验列表、详情、类型选择、版本、单节点、部署、指标、设置往返与错误反馈。
+- [ ] 执行 `pnpm typecheck`、适用的行为检查与 `pnpm build`；通过 DOM 与可访问性树检查导航和页面结构。
+
+**通过条件：** 页面功能完整，使用原组件与令牌，计算节点只出现在设置及工作流的相关配置入口。
+
+## 任务 8：会话、专家与本地工作流工具
+
+当前进度：`studio_list_workflows`、`studio_get_workflow`、`studio_run_workflow`、`studio_get_workflow_execution` 已注册为内部工具，直接使用本地定义和执行记录。输入卡片、答复幂等、固定版本和重新打开数据库检查通过。专家会话按保存的版本检查依赖，前端引用保留字符串版本 ID。实际模型调用和会话工作流恢复继续验证。
+
+**修改：** `src-tauri/src/tools.rs`、`agent.rs`、`workflow_inputs.rs`、`workflow_execution.rs`、`expert_runtime.rs`、`expert_tasks.rs`、`context.rs`、`runs.rs`、会话轨迹与工作流输入组件。
+
+**测试：** `tests/workflows.rs`、`agent.rs`、`experts.rs`、`execution_recovery.rs`。
+
+**接口：** 注册内部工具 `studio_list_workflows`、`studio_get_workflow`、`studio_run_workflow`、`studio_get_workflow_execution`，界面展示对应工作流与动作。输入和结果通过执行 ID 连接工具调用、审批、专家步骤和资产。
+
+- [ ] 使用实际 SQLite 编写固定版本、补充输入、重复答复、审批修改、执行等待和结果去重检查，执行并记录失败结果。
+- [ ] 将 Agent 能力准备与工作流工具连接到本地定义和执行入口，按当前版本输入 Schema 收集与校验。
+- [ ] 在提交前保存工具调用关系与请求编号；取得执行后保存等待状态，逐项导入输出并更新对应专家步骤。
+- [ ] 会话停止等待与计算状态分别处理，继续聊天不修改已提交计算的真实状态。
+- [ ] 用真实模型分别调用本机、远程、在线工作流；核对审批、输入、执行与输出资产。
+- [ ] 重新启动 App 后恢复原输入卡片、审批、执行编号与结果，重复答复不会产生第二次计算。
+
+**通过条件：** 对话与专家通过本地工作流完成真实创作过程，版本、审批与输出关系可核验。
+
+## 任务 9：生命周期、打包与完整验收
+
+**修改：** `src-tauri/src/lib.rs`、`desktop_state.rs`、`menu.rs`、`src-tauri/build.rs`、`tauri.conf.json`、实际 Agent 构建脚本、`README.md`。
+
+**新增记录：** `docs/standalone-verification.md`；记录本计划全部任务的实际证据。
+
+- [ ] 使用目标系统构建独立 Go Agent，安装包按目标架构包含 Agent、FFmpeg、许可证与必要资源。
+- [ ] Rust 只启动解析后的随包 Agent 文件，设置独立数据目录并保存子进程句柄；退出停止本机 Agent，远程 Agent 保持独立生命周期。
+- [ ] 真实验证关闭窗口、退出 App、重新打开、电脑休眠与网络恢复；未结束执行继续使用原 `prompt_id` 或 `task_id`。
+- [ ] 核查源码与依赖，移除平台 URL、账号、目录和发布调用；正常运行的网络访问仅来自明确配置的模型、MCP、生成服务与节点。
+- [ ] 在不能读取 Pixoma 工程目录的环境中执行依赖安装、前端构建、Rust 发布构建与 Go Agent 构建。
+- [ ] 运行 `cargo fmt --manifest-path src-tauri/Cargo.toml --check`、`cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings`、`cargo test --manifest-path src-tauri/Cargo.toml`。
+- [ ] 运行 Go 格式检查、`go test -race ./...`、`go vet ./...` 与构建，前端执行 `pnpm typecheck`、`pnpm test`、`pnpm build`。
+- [ ] 执行 `pnpm tauri build --ci`，从实际安装包完成项目、会话、技能、专家、MCP、资产与三条工作流路径。
+- [ ] 核对设计第十二节，每项记录真实服务版本、命令、结果摘要和通过范围；未执行或缺少结果证据的项目保持未完成。
+
+**通过条件：** 安装包可独立构建与运行，全部要求获得相应证据，真实执行与中断恢复通过。
+
+## 执行环境与记录规则
+
+使用项目规定的 Node.js 22 及以上版本，pnpm 版本遵循 `package.json`。Go 版本不得低于所迁移代码的 `go.mod` 要求，Rust 使用实际锁文件对应工具链。
+
+每项任务先运行有针对性的检查，修改后再次运行。通过后仅在新增修改或新证据要求下扩大检查范围。需要真实服务的用例明确标识，并单独记录实际执行结果。
+
+本计划中的断言示例由对应检查函数取得实际结果后执行。输入字节、远程任务编号和输出文件均来自实际操作，不使用测试服务替身。所有检查目录、临时目录与构建缓存均位于明确指定的 `.local-cache/` 子目录。

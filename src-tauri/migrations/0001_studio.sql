@@ -1,15 +1,13 @@
 CREATE TABLE projects (
     id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL CHECK (length(trim(account_id)) > 0),
     name TEXT NOT NULL CHECK (length(trim(name)) > 0),
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
-CREATE INDEX projects_account ON projects(account_id, created_at DESC);
+CREATE INDEX projects_recent ON projects(created_at DESC, id);
 
 CREATE TABLE sessions (
     id TEXT PRIMARY KEY,
-    account_id TEXT NOT NULL CHECK (length(trim(account_id)) > 0),
     request_id TEXT NOT NULL,
     project_id TEXT REFERENCES projects(id) ON DELETE SET NULL,
     title TEXT NOT NULL,
@@ -23,7 +21,7 @@ CREATE TABLE sessions (
     current_expert_task_id TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    UNIQUE(account_id, request_id)
+    UNIQUE(request_id)
 );
-CREATE INDEX sessions_account_recent ON sessions(account_id, updated_at DESC, id);
-CREATE INDEX sessions_project ON sessions(account_id, project_id, updated_at DESC);
+CREATE INDEX sessions_recent ON sessions(updated_at DESC, id);
+CREATE INDEX sessions_project ON sessions(project_id, updated_at DESC);

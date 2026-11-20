@@ -33,8 +33,7 @@ const ideTheme = EditorView.theme({
     outline: 'none',
   },
   '.cm-content': {
-    fontFamily:
-      'ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace',
+    fontFamily: 'var(--font-mono)',
     padding: '10px 12px',
     caretColor: 'var(--foreground)',
   },

@@ -1,23 +1,22 @@
 import { useEffect, useRef, useState } from 'react'
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useMatchRoute, useNavigate, useSearch } from '@tanstack/react-router'
+import { usePanelRef } from 'react-resizable-panels'
 import { ListTree, Menu, PanelRightClose, PanelRightOpen, Workflow } from 'lucide-react'
 import { ApiError } from '@/lib/api/client'
 import {
   createStudioTextAsset,
-  createStudioFlowEdge,
-  createStudioFlowNode,
-  deleteStudioFlowEdge,
-  deleteStudioFlowNode,
   getStudioSession,
   listStudioModels,
+  listStudioProjects,
+  listStudioLibraryAssets,
   listStudioSkills,
   referenceStudioAsset,
   uploadStudioAsset,
   updateStudioTextAsset,
-  updateStudioFlowNodes,
   type StudioPermissionMode,
   type StudioSessionDetail,
+  type StudioAsset,
 } from '@/lib/api/studio'
 import { Button } from '@/components/ui/button'
 import { Badge } from '@/components/ui/badge'
@@ -38,22 +37,28 @@ import {
 } from '@/components/ui/sheet'
 import { Skeleton } from '@/components/ui/skeleton'
 import { Tabs, TabsContent, TabsList, TabsTrigger } from '@/components/ui/tabs'
+import { ResizableHandle, ResizablePanel, ResizablePanelGroup } from '@/components/ui/resizable'
 import { StudioAssetActions, StudioAssets, type AssetLayout } from './studio-assets'
 import { StudioSessionTasks } from './studio-session-tasks'
 import { isActiveWorkflowExecution } from './studio-session-tasks-data'
-import { StudioChat } from './studio-chat'
-import { StudioFlow } from './studio-flow'
+import { StudioChat, type StudioEditorRequest } from './studio-chat'
+import { StudioVideoEditor } from './video-editor'
+import { getStudioVideoWork, getVideoMaterialContext, type StudioVideoWork, type VideoReferenceLocation } from '@/lib/api/video-projects'
+import { VideoMaterialContext } from './video-material-context'
+import { VideoScriptRequests } from './video-script-requests'
+import { updateVideoScriptRequests, type VideoScriptRequest } from './video-script-request'
 import { StudioLibrary } from './studio-library'
 import { StudioMarket } from './studio-market'
+import type { WorkflowEditorState } from '@/features/cases/workflow-editor'
 import { AssetCatalog } from '@/features/agent-assets/asset-catalog'
-import { listMarketSkills } from '@/lib/api/agent-assets'
-import { getMarketWorkflow } from '@/lib/api/workflow-market'
+import { ExpertEditor } from '@/features/agent-assets/expert-editor'
+import { getWorkflowReference } from '@/lib/api/workflows'
 import { StudioNewSession } from './studio-new-session'
-import { StudioPersonalSettings } from './studio-personal-settings'
 import { StudioSettings, type SettingSection } from './studio-settings'
 import { StudioSidebar, type StudioView } from './studio-sidebar'
 import { StudioTraceTabs } from './studio-trace-tabs'
 import { StudioWorkbenchBackground } from './studio-workbench-background'
+import { StudioPage } from './studio-page'
 
 type SelectedAsset = { assetId: string; assetVersionId: string }
 const viewedRunsStorageKey = 'studio.viewedRunIds'
@@ -69,11 +74,12 @@ export function StudioWorkspace() {
   const marketDetailMatch = matchRoute({ to: '/studio/workflows/$workflowId' })
   const skillMarketMatch = matchRoute({ to: '/studio/skills' })
   const expertMarketMatch = matchRoute({ to: '/studio/experts' })
+  const expertEditorMatch = matchRoute({ to: '/studio/expert-editor/$expertId' })
   const sessionMatch = matchRoute({
     to: '/studio/sessions/$sessionId',
     fuzzy: true,
   })
-  const view: StudioView = skillMarketMatch ? 'skill-market' : expertMarketMatch ? 'expert-market' : marketMatch
+  const view: StudioView = skillMarketMatch ? 'skill-market' : expertMarketMatch || expertEditorMatch ? 'expert-market' : marketMatch
     ? 'market'
     : libraryMatch
     ? 'library'
@@ -82,25 +88,57 @@ export function StudioWorkspace() {
       : 'chat'
   const activeSessionId = sessionMatch ? sessionMatch.sessionId : undefined
   const marketListPosition = useRef(0)
+  const [workflowEditorState, setWorkflowEditorState] = useState<WorkflowEditorState>()
+  const [createNode, setCreateNode] = useState(false)
   const marketReturnSearch = useRef<{ q?: string; category?: string }>({})
   useEffect(() => {
     if (view === 'market') marketReturnSearch.current = { q: search.q, category: search.category }
   }, [view, search.q, search.category])
   const draftWorkflowId = typeof search.workflow === 'string' ? search.workflow : undefined
-  const marketDraft = useQuery({ queryKey: ['workflow-market', draftWorkflowId], queryFn: () => getMarketWorkflow(draftWorkflowId!), enabled: view === 'chat' && !activeSessionId && Boolean(draftWorkflowId) })
+  const marketDraft = useQuery({ queryKey: ['studio', 'workflow-reference', draftWorkflowId], queryFn: () => getWorkflowReference(draftWorkflowId!), enabled: view === 'chat' && !activeSessionId && Boolean(draftWorkflowId) })
   const traceOpen = Boolean(
     matchRoute({ to: '/studio/sessions/$sessionId/trace' })
   )
-  const panel = search.panel ?? 'assets'
-  const [mobileWorkbenchTab, setMobileWorkbenchTab] = useState<'assets' | 'flow' | 'tasks'>('assets')
   const [assetLayout, setAssetLayout] = useState<AssetLayout>('adaptive')
-  const [focusAsset, setFocusAsset] = useState<{ id: string; request: number }>()
   const [rightOpen, setRightOpen] = useState(true)
+  const editorSender = useRef<{ sessionId: string; send: (request: StudioEditorRequest) => void } | undefined>(undefined)
+  const pendingEditorRequest = useRef<{ sessionId: string; request: StudioEditorRequest; resolve: () => void; reject: (error: unknown) => void } | undefined>(undefined)
+  const [scriptRequests, setScriptRequests] = useState<VideoScriptRequest[]>(() => JSON.parse(window.sessionStorage.getItem('studio.video-script-requests') ?? '[]') as VideoScriptRequest[])
+  useEffect(() => { window.sessionStorage.setItem('studio.video-script-requests', JSON.stringify(scriptRequests)) }, [scriptRequests])
   const workbenchOpen = rightOpen && !traceOpen
+  const [workbenchDocked, setWorkbenchDocked] = useState(() => window.matchMedia('(min-width: 1280px)').matches)
+  const chatPanel = usePanelRef()
+  const workbenchPanel = usePanelRef()
+  const workbenchGroup = useRef<HTMLDivElement>(null)
+  const preferredChatWidth = useRef(380)
+  const workbenchVisible = workbenchDocked && workbenchOpen
+  useEffect(() => {
+    const media = window.matchMedia('(min-width: 1280px)')
+    const update = () => setWorkbenchDocked(media.matches)
+    media.addEventListener('change', update)
+    return () => media.removeEventListener('change', update)
+  }, [])
+  useEffect(() => {
+    if (view !== 'chat' || !activeSessionId) return
+    const resizeWorkspace = () => {
+      if (workbenchVisible) {
+        workbenchPanel.current?.expand()
+        chatPanel.current?.resize(preferredChatWidth.current)
+      } else {
+        workbenchPanel.current?.collapse()
+        chatPanel.current?.resize('100%')
+      }
+    }
+    resizeWorkspace()
+    const observer = new ResizeObserver(resizeWorkspace)
+    if (workbenchGroup.current) observer.observe(workbenchGroup.current)
+    return () => observer.disconnect()
+  }, [view, activeSessionId, workbenchVisible, chatPanel, workbenchPanel])
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false)
   const [workbenchSheetOpen, setWorkbenchSheetOpen] = useState(false)
   const [locateMessage, setLocateMessage] = useState<{
     id: string
+    alternateId?: string
     request: number
   }>()
   const [viewedRunIds, setViewedRunIds] = useState<Record<string, string>>(() =>
@@ -135,10 +173,7 @@ export function StudioWorkspace() {
   const skills = useQuery({
     queryKey: ['studio', 'skills'],
     queryFn: async () => {
-      const [owned, published] = await Promise.all([listStudioSkills(), listMarketSkills()])
-      const selected = new Map(published.map(skill => [skill.id, skill]))
-      for (const skill of owned) selected.set(skill.id, skill as typeof published[number])
-      return [...selected.values()].filter(skill => skill.enabled)
+      return (await listStudioSkills()).filter(skill => skill.enabled)
     },
   })
   const startNewSession = (projectId = '') => {
@@ -147,6 +182,35 @@ export function StudioWorkspace() {
     void navigate({ to: '/studio', search: { project: projectId } })
   }
   const sessionId = activeSessionId
+  const videoId = search.video
+  const videoWork = useQuery({ queryKey: ['studio', 'video-work', videoId], queryFn: () => getStudioVideoWork(videoId!), enabled: view === 'chat' && Boolean(videoId) })
+  const [materialVersions, setMaterialVersions] = useState<Record<string, string>>({})
+  const materialChat = videoWork.data?.chats.find(chat => chat.session_id === sessionId)
+  const material = videoWork.data?.materials.find(material => material.id === materialChat?.material_id)
+  const materialVersion = sessionId ? materialVersions[sessionId] : undefined
+  const materialContext = useQuery({ queryKey: ['studio', 'material-context', videoId, sessionId, materialVersion], queryFn: () => getVideoMaterialContext(videoId!, sessionId!, materialVersion), enabled: Boolean(material && videoId && sessionId), retry: false })
+  const videoSessionId = videoWork.data?.main_session_id ?? sessionId
+  const videoSession = useQuery({ queryKey: ['studio', 'session', videoSessionId], queryFn: () => getStudioSession(videoSessionId!), enabled: view === 'chat' && Boolean(videoId && videoSessionId && videoSessionId !== sessionId) })
+  async function openVideoChat(work: StudioVideoWork, targetSessionId: string, location?: VideoReferenceLocation) {
+    await queryClient.fetchQuery({ queryKey: ['studio', 'session', targetSessionId], queryFn: () => getStudioSession(targetSessionId) })
+    queryClient.setQueryData(['studio', 'video-work', work.id], work)
+    await navigate({ to: '/studio/sessions/$sessionId', params: { sessionId: targetSessionId }, search: { panel: 'video', video: work.id, ...location } })
+  }
+  async function sendVideoEditorRequest(request: StudioEditorRequest) {
+    if (!videoSessionId) throw new Error('视频对话尚未就绪')
+    if (pendingEditorRequest.current) throw new Error('正在打开视频对话')
+    if (sessionId === videoSessionId) {
+      if (editorSender.current?.sessionId !== videoSessionId) throw new Error('视频对话尚未就绪')
+      editorSender.current.send(request)
+      return
+    }
+    if (!videoWork.data) throw new Error('视频作品尚未读取')
+    const work = videoWork.data
+    await new Promise<void>((resolve, reject) => {
+      pendingEditorRequest.current = { sessionId: videoSessionId, request, resolve, reject }
+      void openVideoChat(work, videoSessionId).catch(error => { pendingEditorRequest.current = undefined; reject(error) })
+    })
+  }
 
   const detail = useQuery({
     queryKey: ['studio', 'session', sessionId],
@@ -164,6 +228,13 @@ export function StudioWorkspace() {
         ? 2500
         : false,
   })
+  const projects = useQuery({
+    queryKey: ['studio', 'projects'],
+    queryFn: listStudioProjects,
+    enabled: view === 'chat' && Boolean(sessionId),
+  })
+  const currentProject = projects.data?.find(project => project.id === detail.data?.session.project_id)
+  const panel = search.panel ?? (currentProject?.project_type === 'video' ? 'video' : 'assets')
   useEffect(() => {
     window.localStorage.setItem(
       viewedRunsStorageKey,
@@ -239,58 +310,6 @@ export function StudioWorkspace() {
     }
   }, [queryClient, sessionId, view])
 
-  const saveFlowPositions = useMutation({
-    mutationFn: (
-      nodes: Array<{
-        id: string
-        position: { x: number; y: number }
-        sort_order: number
-      }>
-    ) => updateStudioFlowNodes(sessionId!, nodes),
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ['studio', 'session', sessionId],
-      })
-    },
-  })
-  const createFlowNode = useMutation({
-    mutationFn: (input: {
-      type: 'stage' | 'plan' | 'operation'
-      title: string
-      body?: string
-      position: { x: number; y: number }
-    }) => createStudioFlowNode(sessionId!, input),
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ['studio', 'session', sessionId],
-      })
-    },
-  })
-  const deleteFlowNode = useMutation({
-    mutationFn: (nodeId: string) => deleteStudioFlowNode(sessionId!, nodeId),
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ['studio', 'session', sessionId],
-      })
-    },
-  })
-  const createFlowEdge = useMutation({
-    mutationFn: (input: { source: string; target: string; label?: string }) =>
-      createStudioFlowEdge(sessionId!, input),
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ['studio', 'session', sessionId],
-      })
-    },
-  })
-  const deleteFlowEdge = useMutation({
-    mutationFn: (edgeId: string) => deleteStudioFlowEdge(sessionId!, edgeId),
-    onSettled: () => {
-      void queryClient.invalidateQueries({
-        queryKey: ['studio', 'session', sessionId],
-      })
-    },
-  })
   const createTextAsset = useMutation({
     mutationFn: (input: { name: string; content: string; requestId: string }) =>
       createStudioTextAsset({ sessionId: sessionId!, ...input }),
@@ -330,6 +349,20 @@ export function StudioWorkspace() {
   })
   const currentSessionDetail =
     detail.data?.session.id === sessionId ? detail.data : undefined
+  const projectAssets = useQuery({
+    queryKey: ['studio', 'workspace-project-assets', currentSessionDetail?.session.project_id, currentSessionDetail?.assets.map(asset => `${asset.id}:${asset.current_version}`).join(',')],
+    enabled: view === 'chat' && Boolean(currentSessionDetail),
+    queryFn: async () => {
+      const assets: StudioAsset[] = []
+      let cursor: string | undefined
+      do {
+        const page = await listStudioLibraryAssets({ projectId: currentSessionDetail!.session.project_id ?? '', limit: 100, cursor })
+        assets.push(...page.items.map(item => item.asset))
+        cursor = page.next_cursor
+      } while (cursor)
+      return [...new Map(assets.map(asset => [asset.id, asset])).values()]
+    },
+  })
   const activeWorkflowCount = currentSessionDetail?.workflow_executions?.filter(isActiveWorkflowExecution).length ?? 0
   const uploadAsset = useMutation({
     mutationFn: (file: File) => uploadStudioAsset(file, sessionId),
@@ -351,7 +384,7 @@ export function StudioWorkspace() {
         void navigate({
           to: '/studio/sessions/$sessionId',
           params: { sessionId: id },
-          search: {},
+          search: videoWork.data && (videoWork.data.main_session_id === id || videoWork.data.chats.some(chat => chat.session_id === id)) ? { video: videoId, panel } : {},
         })
       })
     },
@@ -372,7 +405,7 @@ export function StudioWorkspace() {
         ++chatOpenGeneration.current
         void navigate({
           to: '/studio/settings/$section',
-          params: { section: 'sessions' },
+          params: { section: 'general' },
           search: {},
         })
       } else {
@@ -396,7 +429,7 @@ export function StudioWorkspace() {
     },
   }
 
-  const renderWorkbenchContent = (kind: 'flow' | 'assets' | 'tasks') => {
+  const renderWorkbenchContent = (kind: 'video' | 'assets' | 'tasks', editorActive = false) => {
     if (!sessionId || (detail.isError && !currentSessionDetail)) return null
     if (!currentSessionDetail) {
       return (
@@ -405,33 +438,30 @@ export function StudioWorkspace() {
         </div>
       )
     }
-    if (kind === 'tasks') return <StudioSessionTasks executions={currentSessionDetail.workflow_executions ?? []} nodes={currentSessionDetail.flow.nodes} />
-    if (kind === 'flow') {
-      return (
-        <StudioFlow
-          background={false}
-          nodes={currentSessionDetail.flow.nodes}
-          edges={currentSessionDetail.flow.edges}
-          workflowExecutions={currentSessionDetail.workflow_executions}
-          onAssetOpen={(id) => {
-            setFocusAsset((current) => ({ id, request: (current?.request ?? 0) + 1 }))
-            setMobileWorkbenchTab('assets')
-            void navigate({ to: '/studio/sessions/$sessionId', params: { sessionId }, search: {} })
-          }}
-          onNodeCreate={(input) => createFlowNode.mutateAsync(input)}
-          onNodeDelete={(id) => deleteFlowNode.mutateAsync(id)}
-          onEdgeCreate={(input) => createFlowEdge.mutateAsync(input)}
-          onEdgeDelete={(id) => deleteFlowEdge.mutateAsync(id)}
-          onPositionsChange={(nodes) => saveFlowPositions.mutateAsync(nodes)}
-        />
-      )
-    }
+    if (currentSessionDetail.session.project_id && projects.isPending) return <Skeleton className='h-full w-full' />
+    if (currentSessionDetail.session.project_id && projects.isError && !currentProject) return <Empty><EmptyHeader><EmptyTitle>读取项目失败</EmptyTitle></EmptyHeader><EmptyContent><Button variant='outline' size='sm' onClick={() => void projects.refetch()}>重新读取</Button></EmptyContent></Empty>
+    if (kind === 'video' && videoId && videoWork.isError) return <Empty><EmptyHeader><EmptyTitle>{videoWork.error.message}</EmptyTitle></EmptyHeader></Empty>
+    if (kind === 'video' && videoId && videoWork.isPending) return <Skeleton className='h-full w-full' />
+    const editorDetail = videoSessionId === sessionId ? currentSessionDetail : videoSession.data
+    if (kind === 'video' && !editorDetail) return <Skeleton className='h-full w-full' />
+    if (kind === 'video') return <StudioVideoEditor
+      key={videoSessionId} active={editorActive} sessionId={videoSessionId!} activeChatId={sessionId} videoId={videoId} projectId={videoWork.data?.project_id ?? editorDetail!.session.project_id} assets={editorDetail!.assets}
+      onOpenVideoChat={openVideoChat} referenceLocation={search.shot && search.reference ? { shot: search.shot, reference: search.reference } : undefined}
+      skills={editorDetail!.session.expert_id ? editorDetail!.expert_capabilities.skills : skills.data ?? []} canInstallScriptSkill={!editorDetail!.session.expert_id}
+      scriptRequests={<VideoScriptRequests requests={scriptRequests.filter(request => request.sessionId === videoSessionId)} onLocate={(messageId, clientMessageId) => {
+        setWorkbenchSheetOpen(false)
+        if (messageId) setLocateMessage({ id: messageId, alternateId: clientMessageId, request: Date.now() })
+      }} />}
+      onScriptRequest={sendVideoEditorRequest}
+      onReference={asset => { const version = asset.versions.find(version => version.version === asset.current_version); if (version) setAssetSelection(current => ({ sessionId, assets: [...(current?.sessionId === sessionId ? current.assets : []), { assetId: asset.id, assetVersionId: version.id }] })); void queryClient.invalidateQueries({ queryKey: ['studio', 'session', sessionId] }) }}
+    />
+    if (kind === 'tasks') return <StudioSessionTasks executions={currentSessionDetail.workflow_executions ?? []} />
+    if (projectAssets.isPending) return <Skeleton className='h-full w-full' />
+    if (projectAssets.isError) return <Empty><EmptyHeader><EmptyTitle>{projectAssets.error.message}</EmptyTitle></EmptyHeader></Empty>
     return (
       <StudioAssets
-        assets={currentSessionDetail.assets}
+        assets={projectAssets.data ?? []}
         layout={assetLayout}
-        focusAsset={focusAsset}
-        onFocusAssetClose={(request) => setFocusAsset((current) => current?.request === request ? undefined : current)}
         messages={currentSessionDetail.messages}
         onLocateMessage={(id) => {
           setLocateMessage((current) => ({
@@ -458,17 +488,15 @@ export function StudioWorkspace() {
   /> : null
 
   const workbenchTabs = () => (
-    <Tabs value={mobileWorkbenchTab} onValueChange={(value) => setMobileWorkbenchTab(value as 'assets' | 'flow' | 'tasks')} className='relative min-h-0 flex-1 gap-0'>
+    <Tabs value={panel} onValueChange={(value) => void navigate({ to: '/studio/sessions/$sessionId', params: { sessionId: sessionId! }, search: { video: videoId, panel: value === 'video' || value === 'tasks' ? value : 'assets' } })} className='relative min-h-0 flex-1 gap-0'>
       <StudioWorkbenchBackground />
       <TabsList className='absolute top-3 left-4 z-10'>
-        <TabsTrigger value='assets'>会话资产</TabsTrigger>
-        <TabsTrigger value='flow'>制作流程</TabsTrigger>
+        <TabsTrigger value='video'>视频编辑器</TabsTrigger>
+        <TabsTrigger value='assets'>项目资产</TabsTrigger>
         <TabsTrigger value='tasks'>会话任务</TabsTrigger>
       </TabsList>
-      {mobileWorkbenchTab === 'assets' ? <div className='absolute top-14 right-4 z-10 sm:top-3'>{renderAssetActions()}</div> : null}
-      <TabsContent value='flow' className='relative z-0 m-0 min-h-0'>
-        {renderWorkbenchContent('flow')}
-      </TabsContent>
+      {panel === 'assets' ? <div className='absolute top-14 right-4 z-10 sm:top-3'>{renderAssetActions()}</div> : null}
+      <TabsContent value='video' forceMount className='relative z-0 m-0 min-h-0 pt-14 data-[state=inactive]:hidden'>{renderWorkbenchContent('video', workbenchSheetOpen && panel === 'video')}</TabsContent>
       <TabsContent value='assets' className='relative z-0 m-0 min-h-0 pt-28 sm:pt-16'>
         {renderWorkbenchContent('assets')}
       </TabsContent>
@@ -478,10 +506,10 @@ export function StudioWorkspace() {
 
   return (
     <div className='flex h-svh min-h-0 w-full overflow-hidden'>
-      <div className='hidden lg:flex'>
+      <div data-slot='studio-desktop-sidebar' className='hidden lg:flex'>
         <StudioSidebar {...sidebarProps} />
       </div>
-      <div className='fixed top-3 left-3 z-30 lg:hidden'>
+      <div data-slot='studio-mobile-menu' className='fixed top-6 left-6 z-30 sm:top-7 sm:left-7 lg:hidden'>
         <Sheet open={mobileMenuOpen} onOpenChange={setMobileMenuOpen}>
           <IconButtonTooltip label='打开 Studio 菜单'>
             <SheetTrigger asChild>
@@ -498,15 +526,21 @@ export function StudioWorkspace() {
           <SheetContent side='left' className='w-64 bg-muted/30 p-0'>
             <SheetTitle className='sr-only'>Studio 菜单</SheetTitle>
             <SheetDescription className='sr-only'>
-              切换对话、资产库、工作流市场和设置。
+              切换对话、资产库、工作流和设置。
             </SheetDescription>
             <StudioSidebar {...mobileSidebarProps} />
           </SheetContent>
         </Sheet>
       </div>
 
+      <StudioPage>
       {view === 'library' ? (
         <StudioLibrary
+          onOpenVideoWork={async (work, location) => {
+            if (!work.main_session_id) throw new Error('视频主对话尚未创建')
+            await queryClient.invalidateQueries({ queryKey: ['studio', 'sessions'] })
+            await openVideoChat(work, work.main_session_id, location)
+          }}
           initialProjectId={libraryEntryProjectId}
           initialSessionId={libraryEntrySessionId}
           initialSessionTitle={libraryEntrySessionTitle}
@@ -533,13 +567,18 @@ export function StudioWorkspace() {
           }}
         />
       ) : null}
-      {view === 'market' ? <StudioMarket workflowId={marketDetailMatch ? marketDetailMatch.workflowId : undefined} listPositionRef={marketListPosition} /> : null}
-      {view === 'skill-market' ? <AssetCatalog scope='studio' kind='skills' market /> : null}
-      {view === 'expert-market' ? <AssetCatalog scope='studio' kind='experts' market /> : null}
-      {view === 'settings' ? (
-        settingsMatch && ['models', 'skills', 'mcp'].includes(settingsMatch.section) ? (
-          <StudioSettings section={settingsMatch.section as SettingSection} onSectionChange={section => void navigate({ to: '/studio/settings/$section', params: { section } })} />
-        ) : <StudioPersonalSettings
+      {view === 'market' ? <StudioMarket workflowId={marketDetailMatch ? marketDetailMatch.workflowId : undefined} listPositionRef={marketListPosition}
+        editorState={workflowEditorState} onEditorStateChange={setWorkflowEditorState} onSaved={() => setWorkflowEditorState(undefined)}
+        onManageNodes={(mode) => { setCreateNode(mode === 'create'); void navigate({ to: '/studio/settings/$section', params: { section: 'compute-nodes' } }) }} /> : null}
+      {view === 'skill-market' ? <AssetCatalog scope='studio' kind='skills' /> : null}
+      {view === 'expert-market' ? expertEditorMatch ? <ExpertEditor scope='studio' id={expertEditorMatch.expertId === 'new' ? undefined : expertEditorMatch.expertId} onClose={() => void navigate({ to: '/studio/experts' })} /> : <AssetCatalog scope='studio' kind='experts' /> : null}
+      {view === 'settings' && settingsMatch ? (
+        <StudioSettings
+          section={settingsMatch.section as SettingSection}
+          onSectionChange={section => void navigate({ to: '/studio/settings/$section', params: { section } })}
+          createNode={createNode}
+          onCreateNodeHandled={() => setCreateNode(false)}
+          onReturnWorkflow={workflowEditorState ? () => void navigate({ to: '/studio/workflows/$workflowId', params: { workflowId: workflowEditorState.workflowId ?? 'new' }, search: { ...marketReturnSearch.current, edit: true, section: workflowEditorState.kind !== 'online' ? workflowEditorState.section : undefined } }) : undefined}
           onSessionsCleared={() => {
             ++chatOpenGeneration.current
             setViewedRunIds({})
@@ -563,21 +602,29 @@ export function StudioWorkspace() {
         />
       ) : null}
       {view === 'chat' && sessionId ? (
-        <div className='min-h-0 min-w-0 flex-1 py-3 pr-3 sm:py-4 sm:pr-4'>
           <section
             data-slot='studio-workbench'
-            className='flex h-full min-h-0 overflow-hidden rounded-2xl border bg-card'
+            className='flex min-h-0 min-w-0 flex-1 overflow-hidden'
           >
-            <main id='main-content' className='flex min-w-0 flex-1 flex-col'>
-              <header className='flex min-h-16 items-center justify-between gap-3 px-5 pl-16 lg:pl-5'>
+            <ResizablePanelGroup elementRef={workbenchGroup} orientation='horizontal' className='min-h-0 flex-1' onLayoutChanged={(layout, { isUserInteraction }) => {
+              if (!isUserInteraction || !workbenchVisible) return
+              if (layout['studio-workbench-pane'] === 0) setRightOpen(false)
+              else if (chatPanel.current && workbenchPanel.current) {
+                const availableWidth = chatPanel.current.getSize().inPixels + workbenchPanel.current.getSize().inPixels
+                preferredChatWidth.current = availableWidth * layout['studio-chat-pane'] / 100
+              }
+            }}>
+            <ResizablePanel id='studio-chat-pane' panelRef={chatPanel} defaultSize={380} minSize={380} groupResizeBehavior='preserve-pixel-size' className='flex min-w-0 flex-col'>
+              <header data-tauri-drag-region='deep' className='studio-page-header justify-between'>
                 <div className='min-w-0 flex-1'>
                   <div className='flex min-w-0 items-center gap-2'>
                     <h1 className='min-w-0 truncate text-sm font-semibold'>{detail.data?.session.title ?? '新对话'}</h1>
+                    {material && sessionId ? <VideoMaterialContext material={material} context={materialContext.data} sessionId={sessionId} assets={detail.data?.assets ?? []} error={materialContext.error?.message} loading={materialContext.isFetching} onVersion={id => setMaterialVersions(current => ({ ...current, [sessionId]: id }))} /> : null}
+                    {videoWork.data?.main_session_id && videoWork.data.main_session_id !== sessionId ? <Button size='sm' variant='ghost' onClick={() => void openVideoChat(videoWork.data!, videoWork.data!.main_session_id!)}>返回视频对话</Button> : null}
                     {activeWorkflowCount > 0 ? <Badge asChild variant='secondary' className='h-6 cursor-pointer text-sm hover:bg-secondary/80'>
                       <button type='button' aria-label={`工作流运行中，查看会话任务；当前 ${activeWorkflowCount} 个工作流`} onClick={() => {
                         setRightOpen(true)
                         setWorkbenchSheetOpen(window.matchMedia('(max-width: 1279px)').matches)
-                        setMobileWorkbenchTab('tasks')
                         void navigate({ to: '/studio/sessions/$sessionId', params: { sessionId: sessionId! }, search: { panel: 'tasks' } })
                       }}><Workflow className='motion-safe:animate-pulse' />工作流运行中</button>
                     </Badge> : null}
@@ -615,7 +662,7 @@ export function StudioWorkspace() {
                     <ListTree />
                     {traceOpen ? '对话' : '轨迹'}
                   </Button>
-                  {!traceOpen ? (
+                  {!traceOpen && !workbenchDocked ? (
                     <Sheet
                       open={workbenchSheetOpen}
                       onOpenChange={setWorkbenchSheetOpen}
@@ -634,13 +681,13 @@ export function StudioWorkspace() {
                       </IconButtonTooltip>
                       <SheetContent
                         side='right'
-                        className='w-full max-w-none gap-0 bg-card p-0 sm:w-[min(90vw,42rem)] sm:max-w-none'
+                        className='w-full max-w-none gap-0 bg-card p-0 sm:w-[95vw] sm:max-w-none'
                       >
                         <SheetTitle className='px-4 pt-4 text-sm'>
                           创作工作台
                         </SheetTitle>
                         <SheetDescription className='sr-only'>
-                          查看制作流程、会话资产和会话任务。
+                          查看会话资产和会话任务。
                         </SheetDescription>
                         {workbenchTabs()}
                       </SheetContent>
@@ -692,7 +739,18 @@ export function StudioWorkspace() {
               ) : (
                 <StudioChat
                   key={sessionId}
+                  onEditorSenderChange={send => {
+                    editorSender.current = send ? { sessionId, send } : undefined
+                    const pending = pendingEditorRequest.current
+                    if (send && pending?.sessionId === sessionId) {
+                      pendingEditorRequest.current = undefined
+                      try { send(pending.request); pending.resolve() } catch (error) { pending.reject(error) }
+                    }
+                  }}
+                  onEditorRequestChange={request => setScriptRequests(current => updateVideoScriptRequests(current, request))}
                   sessionId={sessionId}
+                  materialContext={material && materialContext.data ? { video_id: materialContext.data.video_id, material_id: materialContext.data.material_id, asset_id: materialContext.data.asset_id, asset_version_id: materialContext.data.asset_version?.id ?? null } : undefined}
+                  materialContextPending={Boolean((videoId && (videoWork.isPending || videoWork.isError)) || (materialChat && (!materialContext.data || materialContext.isFetching || materialContext.isError)))}
                   projectId={detail.data.session.project_id ?? ''}
                   messages={detail.data.messages}
                   transcript={detail.data.transcript}
@@ -761,24 +819,18 @@ export function StudioWorkspace() {
                   }}
                 />
               )}
-            </main>
+            </ResizablePanel>
+            <ResizableHandle aria-label='调整对话与工作台宽度' disabled={!workbenchVisible} disableDoubleClick onDoubleClick={() => { preferredChatWidth.current = 380; chatPanel.current?.resize(380) }} className={workbenchVisible ? 'after:w-3' : 'hidden'} />
+            <ResizablePanel id='studio-workbench-pane' panelRef={workbenchPanel} minSize={400} collapsible className='min-w-0'>
             <aside
               data-slot='studio-workbench-track'
-              aria-hidden={!workbenchOpen}
-              inert={!workbenchOpen}
-              className={`hidden shrink-0 overflow-hidden transition-[flex-basis,width,min-width,max-width] duration-300 ease-in-out xl:flex xl:flex-col ${
-                workbenchOpen
-                  ? 'w-[42%] max-w-2xl min-w-80 basis-[42%]'
-                  : 'w-0 max-w-0 min-w-0 basis-0'
-              }`}
+              aria-hidden={!workbenchVisible}
+              inert={!workbenchVisible}
+              className='flex h-full min-w-0 flex-col overflow-hidden'
             >
               <div
                 data-slot='studio-workbench-panel'
-                className={`flex h-full w-full max-w-2xl min-w-80 flex-col border-s bg-muted/20 transition-transform duration-300 ease-in-out ${
-                  workbenchOpen
-                    ? 'translate-x-0'
-                    : 'pointer-events-none translate-x-full'
-                }`}
+                className='flex h-full w-full min-w-80 flex-col bg-muted/20'
               >
                 <Tabs
                   value={panel}
@@ -787,7 +839,7 @@ export function StudioWorkspace() {
                       to: '/studio/sessions/$sessionId',
                       params: { sessionId: sessionId! },
                       search: {
-                        panel: nextPanel === 'flow' || nextPanel === 'tasks' ? nextPanel : undefined,
+                        panel: nextPanel === 'video' || nextPanel === 'assets' || nextPanel === 'tasks' ? nextPanel : undefined,
                       },
                     })
                   }
@@ -795,10 +847,8 @@ export function StudioWorkspace() {
                 >
                   <StudioWorkbenchBackground />
                   <TabsList className='absolute top-3 left-4 z-10'>
-                    <TabsTrigger value='assets' disabled={!sessionId}>会话资产</TabsTrigger>
-                    <TabsTrigger value='flow' disabled={!sessionId}>
-                      制作流程
-                    </TabsTrigger>
+                    <TabsTrigger value='video' disabled={!sessionId}>视频编辑器</TabsTrigger>
+                    <TabsTrigger value='assets' disabled={!sessionId}>项目资产</TabsTrigger>
                     <TabsTrigger value='tasks' disabled={!sessionId}>会话任务</TabsTrigger>
                   </TabsList>
                   <div className='absolute top-3 right-5 z-10 flex items-center gap-1'>
@@ -814,12 +864,7 @@ export function StudioWorkspace() {
                   </IconButtonTooltip>
                   {panel === 'assets' ? renderAssetActions() : null}
                   </div>
-                  <TabsContent
-                    value='flow'
-                    className='relative z-0 m-0 min-h-0'
-                  >
-                    {renderWorkbenchContent('flow')}
-                  </TabsContent>
+                  <TabsContent value='video' forceMount className='relative z-0 m-0 min-h-0 pt-14 data-[state=inactive]:hidden'>{workbenchDocked ? renderWorkbenchContent('video', workbenchVisible && panel === 'video') : null}</TabsContent>
                   <TabsContent
                     value='assets'
                     className='relative z-0 m-0 min-h-0 pt-16'
@@ -830,9 +875,11 @@ export function StudioWorkspace() {
                 </Tabs>
               </div>
             </aside>
+            </ResizablePanel>
+            </ResizablePanelGroup>
           </section>
-        </div>
       ) : null}
+      </StudioPage>
     </div>
   )
 }

@@ -2,6 +2,12 @@
 pub enum Error {
     #[error("{0}")]
     Invalid(&'static str),
+    #[error("{0}")]
+    Validation(String),
+    #[error("{0}")]
+    Conflict(String),
+    #[error("计算节点凭据无效")]
+    NodeUnauthorized,
     #[error("记录不存在或无权访问")]
     NotFound,
     #[error("数据库操作失败：{0}")]
@@ -28,8 +34,6 @@ pub enum Error {
     Agent(#[source] Box<rig::completion::PromptError>),
     #[error("运行已取消")]
     Cancelled,
-    #[error("凭据操作失败：{0}")]
-    Credentials(#[from] keyring::Error),
     #[error("{0}")]
     State(&'static str),
     #[error("{message}")]

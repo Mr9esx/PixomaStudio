@@ -17,8 +17,7 @@ fn group(mode: &str, value: &str, label: &str, count: i64) -> Value {
 }
 
 impl Store {
-    pub(crate) async fn library_tree(&self, account: &str, tree: TreeQuery) -> Result<Value> {
-        Self::check_account(account)?;
+    pub(crate) async fn library_tree(&self, tree: TreeQuery) -> Result<Value> {
         let mode = if tree.mode.is_empty() {
             "asset"
         } else {
@@ -26,7 +25,7 @@ impl Store {
         };
         check_tree_mode(mode)?;
         if !tree.project_id.is_empty() {
-            self.get_project(account, &tree.project_id).await?;
+            self.get_project(&tree.project_id).await?;
         }
         let mut query = LibraryQuery {
             project_id: tree.project_id.clone(),
@@ -62,13 +61,11 @@ impl Store {
                     query.category_id = Some("none".to_owned())
                 }
                 "category" => {
-                    let category = self.category(account, value).await?;
+                    let category = self.category(value).await?;
                     if category.project_id != tree.project_id {
                         return Err(Error::NotFound);
                     }
-                    let groups = self
-                        .category_groups(account, &tree.project_id, value)
-                        .await?;
+                    let groups = self.category_groups(&tree.project_id, value).await?;
                     if !groups.is_empty() {
                         return paginate(groups, &tree);
                     }
@@ -78,7 +75,7 @@ impl Store {
             }
         }
         if mode == "asset" || parent.is_some() {
-            let page = self.library_assets(account, &query).await?;
+            let page = self.library_assets(&query).await?;
             let nodes = page["items"].as_array().ok_or(Error::State("资产列表无效"))?.iter().map(|item| Ok(json!({
                 "id": format!("asset:{}", text(item, "id")?), "label": item["display_name"], "kind": "asset", "count": 0,
                 "asset_id": item["id"], "asset_kind": item["asset"]["kind"],
@@ -86,20 +83,17 @@ impl Store {
             return Ok(json!({ "nodes": nodes, "next_cursor": page["next_cursor"] }));
         }
         if mode == "category" {
-            return paginate(
-                self.category_groups(account, &tree.project_id, "").await?,
-                &tree,
-            );
+            return paginate(self.category_groups(&tree.project_id, "").await?, &tree);
         }
         let rows: Vec<(String, String, i64)> = match mode {
-            "format" => query.sql(account, "v.format,CASE WHEN v.format='' THEN '未知格式' ELSE v.format END,count(*)")?
+            "format" => query.sql("v.format,CASE WHEN v.format='' THEN '未知格式' ELSE v.format END,count(*)")?
                 .push(" GROUP BY v.format ORDER BY v.format").build_query_as().fetch_all(&self.pool).await?,
-            "rating" => query.sql(account, "CAST(p.rating AS TEXT),CASE WHEN p.rating=0 THEN '未评分' ELSE CAST(p.rating AS TEXT) END,count(*)")?
+            "rating" => query.sql("CAST(p.rating AS TEXT),CASE WHEN p.rating=0 THEN '未评分' ELSE CAST(p.rating AS TEXT) END,count(*)")?
                 .push(" GROUP BY p.rating ORDER BY p.rating DESC").build_query_as().fetch_all(&self.pool).await?,
-            "tag" => sqlx::query_as("SELECT t.id,t.name,count(*) FROM tags t JOIN project_asset_tags j ON j.tag_id=t.id AND j.account_id=t.account_id JOIN project_assets p ON p.id=j.project_asset_id AND p.account_id=j.account_id WHERE p.account_id=? AND coalesce(p.project_id,'')=? AND p.archived_at IS NULL GROUP BY t.id,t.name ORDER BY t.name,t.id")
-                .bind(account).bind(&tree.project_id).fetch_all(&self.pool).await?,
-            "session" => sqlx::query_as("SELECT u.session_id,max(coalesce(s.title,u.session_title_snapshot)),count(DISTINCT p.id) FROM project_assets p JOIN asset_usages u ON u.account_id=p.account_id AND u.asset_id=p.asset_id LEFT JOIN sessions s ON s.id=u.session_id AND s.account_id=u.account_id WHERE p.account_id=? AND coalesce(p.project_id,'')=? AND p.archived_at IS NULL GROUP BY u.session_id ORDER BY max(coalesce(s.title,u.session_title_snapshot)),u.session_id")
-                .bind(account).bind(&tree.project_id).fetch_all(&self.pool).await?,
+            "tag" => sqlx::query_as("SELECT t.id,t.name,count(*) FROM tags t JOIN project_asset_tags j ON j.tag_id=t.id JOIN project_assets p ON p.id=j.project_asset_id WHERE coalesce(p.project_id,'')=? AND p.archived_at IS NULL GROUP BY t.id,t.name ORDER BY t.name,t.id")
+                .bind(&tree.project_id).fetch_all(&self.pool).await?,
+            "session" => sqlx::query_as("SELECT u.session_id,max(coalesce(s.title,u.session_title_snapshot)),count(DISTINCT p.id) FROM project_assets p JOIN asset_usages u ON u.asset_id=p.asset_id LEFT JOIN sessions s ON s.id=u.session_id WHERE coalesce(p.project_id,'')=? AND p.archived_at IS NULL GROUP BY u.session_id ORDER BY max(coalesce(s.title,u.session_title_snapshot)),u.session_id")
+                .bind(&tree.project_id).fetch_all(&self.pool).await?,
             _ => return Err(Error::Invalid("资产分组方式无效")),
         };
         let mut groups: Vec<Value> = rows
@@ -114,7 +108,7 @@ impl Store {
                 query.session_id = Some("none".to_owned());
                 ("none", "无来源对话")
             };
-            let count = self.library_count(account, &query).await?;
+            let count = self.library_count(&query).await?;
             if count > 0 {
                 groups.push(group(mode, value, label, count));
             }
@@ -122,21 +116,16 @@ impl Store {
         paginate(groups, &tree)
     }
 
-    async fn library_count(&self, account: &str, query: &LibraryQuery) -> Result<i64> {
+    async fn library_count(&self, query: &LibraryQuery) -> Result<i64> {
         Ok(query
-            .sql(account, "count(*)")?
+            .sql("count(*)")?
             .build_query_scalar()
             .fetch_one(&self.pool)
             .await?)
     }
 
-    async fn category_groups(
-        &self,
-        account: &str,
-        project: &str,
-        parent: &str,
-    ) -> Result<Vec<Value>> {
-        let categories = self.categories(account, project).await?;
+    async fn category_groups(&self, project: &str, parent: &str) -> Result<Vec<Value>> {
+        let categories = self.categories(project).await?;
         let mut groups = Vec::new();
         for category in categories
             .iter()
@@ -151,7 +140,7 @@ impl Store {
                 "category",
                 &category.id,
                 &category.name,
-                self.library_count(account, &query).await?,
+                self.library_count(&query).await?,
             ));
         }
         let query = LibraryQuery {
@@ -163,7 +152,7 @@ impl Store {
             }),
             ..Default::default()
         };
-        let count = self.library_count(account, &query).await?;
+        let count = self.library_count(&query).await?;
         if count > 0 {
             groups.push(if parent.is_empty() {
                 group("category", "uncategorized", "未分类", count)

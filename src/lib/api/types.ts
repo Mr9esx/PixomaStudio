@@ -12,6 +12,7 @@ export type EdgeHardware = {
 }
 
 export type EdgeGPUMetric = {
+  id?: string
   name: string
   usage_percent?: number | null
   vram_used_bytes?: number
@@ -20,14 +21,15 @@ export type EdgeGPUMetric = {
 }
 
 export type EdgeMetrics = {
-  cpu_usage_percent: number
-  mem_used_bytes: number
-  mem_total_bytes: number
-  mem_usage_percent: number
+  cpu_usage_percent?: number | null
+  mem_used_bytes?: number | null
+  mem_total_bytes?: number | null
+  mem_usage_percent?: number | null
   gpus?: EdgeGPUMetric[]
   disk_read_bytes_per_sec?: number | null
   disk_write_bytes_per_sec?: number | null
   collected_at: string
+  collection_errors?: string[]
 }
 
 export type EdgeMetricsResponse = {

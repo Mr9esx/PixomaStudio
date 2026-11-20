@@ -20,16 +20,14 @@ fn instruction_parts(parts: &[ExpertPart]) -> Result<String> {
 impl Store {
     pub(crate) async fn expert_runtime_instruction(
         &self,
-        account: &str,
         run: &Value,
     ) -> Result<Option<String>> {
         if run["expert_id"].as_str().is_none_or(str::is_empty) {
             return Ok(None);
         }
-        let session = self.get_session(account, text(run, "session_id")?).await?;
+        let session = self.get_session(text(run, "session_id")?).await?;
         let snapshot: String =
-            sqlx::query_scalar("SELECT expert_snapshot FROM sessions WHERE account_id=? AND id=?")
-                .bind(account)
+            sqlx::query_scalar("SELECT expert_snapshot FROM sessions WHERE id=?")
                 .bind(&session.id)
                 .fetch_one(&self.pool)
                 .await?;
@@ -49,9 +47,9 @@ impl Store {
         let mut task = Value::Null;
         let mut attempts = Vec::new();
         if session.current_expert_task_id.is_some() {
-            task = self.current_expert_task(account, run).await?;
-            let documents: Vec<String> = sqlx::query_scalar("SELECT document FROM expert_step_attempts WHERE account_id=? AND expert_task_id=? ORDER BY created_at,id")
-                .bind(account).bind(text(&task, "id")?).fetch_all(&self.pool).await?;
+            task = self.current_expert_task(run).await?;
+            let documents: Vec<String> = sqlx::query_scalar("SELECT document FROM expert_step_attempts WHERE expert_task_id=? ORDER BY created_at,id")
+                .bind(text(&task, "id")?).fetch_all(&self.pool).await?;
             attempts = documents
                 .iter()
                 .map(|document| serde_json::from_str::<Value>(document))
@@ -59,8 +57,7 @@ impl Store {
         }
         let decision = if run["trigger_kind"] == "card_response" {
             let document: String =
-                sqlx::query_scalar("SELECT document FROM expert_cards WHERE account_id=? AND id=?")
-                    .bind(account)
+                sqlx::query_scalar("SELECT document FROM expert_cards WHERE id=?")
                     .bind(text(run, "trigger_record_id")?)
                     .fetch_one(&self.pool)
                     .await?;
@@ -81,7 +78,6 @@ impl Store {
 
     pub(crate) async fn guard_expert_tool_write(
         &self,
-        account: &str,
         run: &Value,
         tool: &RunTool,
     ) -> Result<()> {
@@ -93,8 +89,7 @@ impl Store {
         }
         if run["trigger_kind"] == "card_response" {
             let document: String =
-                sqlx::query_scalar("SELECT document FROM expert_cards WHERE account_id=? AND id=?")
-                    .bind(account)
+                sqlx::query_scalar("SELECT document FROM expert_cards WHERE id=?")
                     .bind(text(run, "trigger_record_id")?)
                     .fetch_one(&self.pool)
                     .await?;
@@ -103,7 +98,7 @@ impl Store {
                 return Err(Error::Invalid("当前卡片决定没有授权执行此步骤"));
             }
         }
-        let task = self.current_expert_task(account, run).await?;
+        let task = self.current_expert_task(run).await?;
         if task["status"] != "active" && task["status"] != "waiting_tool" {
             return Err(Error::Invalid("当前专家任务尚未开始执行"));
         }
@@ -119,7 +114,6 @@ impl Store {
         let mut transaction = self.pool.begin().await?;
         let attempt = Self::expert_attempt_in(
             &mut transaction,
-            account,
             text(step, "latest_attempt_id").map_err(|_| Error::Invalid("请先开始专家步骤"))?,
         )
         .await?;
@@ -132,14 +126,13 @@ impl Store {
 
     pub(crate) async fn record_expert_asset(
         &self,
-        account: &str,
         run: &Value,
         asset: &Value,
     ) -> Result<()> {
         if run["expert_id"].as_str().is_none_or(str::is_empty) {
             return Ok(());
         }
-        let task = self.current_expert_task(account, run).await?;
+        let task = self.current_expert_task(run).await?;
         let step = task["steps"]
             .as_array()
             .ok_or(Error::State("专家步骤格式无效"))?
@@ -155,7 +148,7 @@ impl Store {
         let reference = json!({ "asset_id": asset["id"], "asset_version_id": version["id"] });
         let mut transaction = self.pool.begin().await?;
         let mut attempt =
-            Self::expert_attempt_in(&mut transaction, account, text(step, "latest_attempt_id")?)
+            Self::expert_attempt_in(&mut transaction, text(step, "latest_attempt_id")?)
                 .await?;
         if attempt["result"]["assets"].is_null() {
             attempt["result"]["assets"] = json!([]);
@@ -166,7 +159,7 @@ impl Store {
         if !references.contains(&reference) {
             references.push(reference);
         }
-        Self::save_expert_attempt_in(&mut transaction, account, &mut attempt).await?;
+        Self::save_expert_attempt_in(&mut transaction, &mut attempt).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -185,27 +178,26 @@ mod tests {
             .prefix("expert-write-permission-")
             .tempdir_in(root)?;
         let store = Store::open(&directory.path().join("studio.sqlite")).await?;
-        let account = "expert-write-permission";
-        let model = store.save_model(account, None, json!({
+        let model = store.save_model(None, json!({
             "name": "本地配置", "protocol": "openai_chat_compatible", "base_url": "http://127.0.0.1:11434/v1", "model": "local-model", "api_key": "",
             "enabled": true, "agent_enabled": true, "default": true,
             "limits": { "context_window_tokens": 32000, "max_input_tokens": 24000, "max_output_tokens": 4000 },
             "thinking": { "enabled": false }, "capabilities": { "tools": true, "vision": false, "image_output": false, "streaming": true },
         })).await?;
-        let expert = store.save_expert(account, None, json!({
+        let expert = store.save_expert(None, json!({
             "schema_version": 2, "name": "步骤权限", "description": "检查真实步骤决定", "model_id": model["id"],
             "prompt_parts": [{ "type": "text", "text": "按照用户决定执行步骤。" }],
             "avatar_asset_id": "", "avatar_version_id": "", "examples": [], "skill_refs": [], "workflow_refs": [],
             "sop": [{ "id": "write", "title": "保存作品", "instruction_parts": [{ "type": "text", "text": "保存用户作品。" }] }],
             "version": "1.0.0", "enabled": true,
         })).await?;
-        let turn = store.submit_message(account, json!({
+        let turn = store.submit_message(json!({
             "request_id": "step-decisions", "text": "开始检查步骤权限，然后跳过该步骤。", "permission_mode": "full_access", "expert_id": expert["id"],
         })).await?;
         let run_id = text(&turn["run"], "id")?;
-        let run = store.get_run(account, run_id).await?;
+        let run = store.get_run(run_id).await?;
         let instruction = store
-            .expert_runtime_instruction(account, &run)
+            .expert_runtime_instruction(&run)
             .await?
             .ok_or("专家系统说明缺失")?;
         assert!(instruction.contains("按照用户决定执行步骤。"));
@@ -213,7 +205,6 @@ mod tests {
         let control = rig::message::ToolName::new("update_expert_task")?;
         store
             .call_expert_control(
-                account,
                 run_id,
                 "create",
                 &control,
@@ -221,27 +212,27 @@ mod tests {
             )
             .await?;
         let tool = store
-            .run_tools(account, run_id)
+            .run_tools(run_id)
             .await?
             .into_iter()
             .find(|tool| tool.display_name() == "create_text_asset")
             .ok_or("资产写入工具缺失")?;
         assert!(
             store
-                .guard_expert_tool_write(account, &run, &tool)
+                .guard_expert_tool_write(&run, &tool)
                 .await
                 .is_err()
         );
-        store.call_expert_control(account, run_id, "start", &control, &json!({
+        store.call_expert_control(run_id, "start", &control, &json!({
             "action": "start_step", "step_id": "write", "authorization_message_id": run["trigger_message_id"], "inputs": {},
         })).await?;
-        store.guard_expert_tool_write(account, &run, &tool).await?;
-        store.call_expert_control(account, run_id, "skip", &control, &json!({
+        store.guard_expert_tool_write(&run, &tool).await?;
+        store.call_expert_control(run_id, "skip", &control, &json!({
             "action": "skip_step", "step_id": "write", "authorization_message_id": run["trigger_message_id"], "check_summary": "用户已经要求跳过。",
         })).await?;
         assert!(
             store
-                .guard_expert_tool_write(account, &run, &tool)
+                .guard_expert_tool_write(&run, &tool)
                 .await
                 .is_err()
         );

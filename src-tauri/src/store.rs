@@ -1,11 +1,12 @@
-use crate::{Result, error::required};
+use crate::Result;
 use sqlx::{
     SqlitePool,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, Weak},
     time::Duration,
 };
 use tokio::sync::Mutex;
@@ -14,8 +15,11 @@ use tokio::sync::Mutex;
 pub struct Store {
     pub(crate) pool: SqlitePool,
     pub(crate) root: PathBuf,
+    pub(crate) compute_address: std::net::SocketAddr,
+    pub(crate) compute_error: Arc<std::sync::RwLock<Option<String>>>,
     pub(crate) model_updates: Arc<Mutex<()>>,
-    pub(crate) publication_updates: Arc<Mutex<()>>,
+    pub(crate) asset_uploads: Arc<Mutex<()>>,
+    pub(crate) video_exports: Arc<Mutex<HashMap<String, (String, Weak<Mutex<()>>)>>>,
     pub(crate) run_changes: tokio::sync::watch::Sender<u64>,
 }
 
@@ -57,11 +61,19 @@ impl Store {
             .connect_with(options)
             .await?;
         sqlx::migrate!("./migrations").run(&pool).await?;
+        let configured: String = sqlx::query_scalar("SELECT listen_address FROM compute_connection WHERE id=1").fetch_one(&pool).await?;
+        let compute_address = crate::compute_nodes::listen_address(&configured)?;
+        sqlx::query("UPDATE compute_nodes SET reported_revision=NULL,comfyui_ready=0")
+            .execute(&pool)
+            .await?;
         let store = Self {
             pool,
             root: root.to_path_buf(),
+            compute_address,
+            compute_error: Arc::new(std::sync::RwLock::new(None)),
             model_updates: Arc::new(Mutex::new(())),
-            publication_updates: Arc::new(Mutex::new(())),
+            asset_uploads: Arc::new(Mutex::new(())),
+            video_exports: Arc::new(Mutex::new(HashMap::new())),
             run_changes: tokio::sync::watch::channel(0).0,
         };
         store.collect_unreferenced_asset_files().await?;
@@ -76,10 +88,6 @@ impl Store {
         self.run_changes.send_modify(|revision| {
             *revision = revision.checked_add(1).expect("运行事件通知序号超过范围");
         });
-    }
-
-    pub(crate) fn check_account(account: &str) -> Result<()> {
-        required(account, "账号不能为空")
     }
 
     pub fn data_root(&self) -> &Path {

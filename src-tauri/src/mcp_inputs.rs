@@ -231,15 +231,14 @@ fn advance_input(saved: &mut Value) -> Result<Option<McpQuestion>> {
 impl Store {
     pub(crate) async fn close_live_mcp_input(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
         call: &ToolCall,
     ) -> Result<()> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT m.document,r.document AS run_document FROM mcp_executions m JOIN runs r ON r.account_id=m.account_id AND r.id=m.run_id WHERE m.account_id=? AND m.run_id=? AND m.id=?")
-            .bind(account).bind(run).bind(id).fetch_optional(&mut *transaction).await?;
+        let row = sqlx::query("SELECT m.document,r.document AS run_document FROM mcp_executions m JOIN runs r ON r.id=m.run_id WHERE m.run_id=? AND m.id=?")
+            .bind(run).bind(id).fetch_optional(&mut *transaction).await?;
         let Some(row) = row else {
             transaction.commit().await?;
             return Ok(());
@@ -266,27 +265,27 @@ impl Store {
             return Err(Error::State("MCP 输入等待状态无效"));
         }
         let now = timestamp()?;
-        let pending = sqlx::query("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.tool_call_id')=? AND json_extract(document,'$.reason')='input_required' AND json_extract(document,'$.status')='pending'")
-            .bind(account).bind(run).bind(id).fetch_all(&mut *transaction).await?;
+        let pending = sqlx::query("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.tool_call_id')=? AND json_extract(document,'$.reason')='input_required' AND json_extract(document,'$.status')='pending'")
+            .bind(run).bind(id).fetch_all(&mut *transaction).await?;
         for row in pending {
             let pending: Value = serde_json::from_str(row.get("document"))?;
-            sqlx::query("UPDATE clarifications SET document=json_set(document,'$.status','cancelled','$.updated_at',?) WHERE account_id=? AND run_id=? AND id=?")
-                .bind(&now).bind(account).bind(run).bind(text(&pending, "id")?).execute(&mut *transaction).await?;
-            sqlx::query("UPDATE messages SET document=json_set(document,'$.clarification.status','skipped') WHERE account_id=? AND id=? AND json_extract(document,'$.clarification.id')=?")
-                .bind(account).bind(text(&pending["metadata"], "messageId")?).bind(text(&pending, "id")?).execute(&mut *transaction).await?;
+            sqlx::query("UPDATE clarifications SET document=json_set(document,'$.status','cancelled','$.updated_at',?) WHERE run_id=? AND id=?")
+                .bind(&now).bind(run).bind(text(&pending, "id")?).execute(&mut *transaction).await?;
+            sqlx::query("UPDATE messages SET document=json_set(document,'$.clarification.status','skipped') WHERE id=? AND json_extract(document,'$.clarification.id')=?")
+                .bind(text(&pending["metadata"], "messageId")?).bind(text(&pending, "id")?).execute(&mut *transaction).await?;
         }
         if current["status"] == "waiting_clarification" {
-            sqlx::query("UPDATE runs SET document=json_set(document,'$.status','running','$.updated_at',?,'$.subscription_after_sequence',(SELECT coalesce(max(sequence),0) FROM run_events WHERE run_id=?)) WHERE account_id=? AND id=? AND status='waiting_clarification'")
-                .bind(&now).bind(run).bind(account).bind(run).execute(&mut *transaction).await?;
-            Self::append_event_in(&mut transaction, account, text(&current, "session_id")?, run, json!({
+            sqlx::query("UPDATE runs SET document=json_set(document,'$.status','running','$.updated_at',?,'$.subscription_after_sequence',(SELECT coalesce(max(sequence),0) FROM run_events WHERE run_id=?)) WHERE id=? AND status='waiting_clarification'")
+                .bind(&now).bind(run).bind(run).execute(&mut *transaction).await?;
+            Self::append_event_in(&mut transaction, text(&current, "session_id")?, run, json!({
                 "type": "RUN_STARTED", "threadId": current["session_id"], "runId": run, "metadata": { "studioRunId": run },
             })).await?;
         }
         saved["status"] = json!("continuing");
         saved["question"] = Value::Null;
         saved["input"]["status"] = json!("closed");
-        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(saved.to_string()).bind(&now).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=?")
+            .bind(saved.to_string()).bind(&now).bind(run).bind(id).execute(&mut *transaction).await?;
         transaction.commit().await?;
         self.notify_run_events();
         Ok(())
@@ -294,14 +293,13 @@ impl Store {
 
     pub(crate) async fn save_mcp_inputs(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
         call: &ToolCall,
         input: &McpInput,
     ) -> Result<()> {
-        let mut saved = self.mcp_execution(account, run, id, tool, call).await?
+        let mut saved = self.mcp_execution(run, id, tool, call).await?
             .unwrap_or_else(|| json!({ "binding": digest(&serde_json::to_vec(&(tool, call)).expect("工具调用无法编码")) }));
         let (source, requests, response) = match input {
             McpInput::Mrtr(result) => {
@@ -400,37 +398,35 @@ impl Store {
         saved["question"] = Value::Null;
         let now = timestamp()?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let changed = sqlx::query("UPDATE tool_calls SET status=?,updated_at=? WHERE account_id=? AND run_id=? AND id=? AND status IN ('executing','waiting_mcp') AND EXISTS(SELECT 1 FROM runs WHERE runs.account_id=tool_calls.account_id AND runs.id=tool_calls.run_id AND runs.status='running')")
-            .bind(if source == "live" { "executing" } else { "waiting_mcp" }).bind(&now).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE tool_calls SET status=?,updated_at=? WHERE run_id=? AND id=? AND status IN ('executing','waiting_mcp') AND EXISTS(SELECT 1 FROM runs WHERE runs.id=tool_calls.run_id AND runs.status='running')")
+            .bind(if source == "live" { "executing" } else { "waiting_mcp" }).bind(&now).bind(run).bind(id).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::State("MCP 工具无法等待输入"));
         }
-        sqlx::query("INSERT INTO mcp_executions(id,account_id,run_id,document,created_at,updated_at) VALUES(?,?,?,?,?,?) ON CONFLICT(run_id,id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at")
-            .bind(id).bind(account).bind(run).bind(saved.to_string()).bind(&now).bind(&now).execute(&mut *transaction).await?;
+        sqlx::query("INSERT INTO mcp_executions(id,run_id,document,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(run_id,id) DO UPDATE SET document=excluded.document,updated_at=excluded.updated_at")
+            .bind(id).bind(run).bind(saved.to_string()).bind(&now).bind(&now).execute(&mut *transaction).await?;
         transaction.commit().await?;
         Ok(())
     }
 
     pub(crate) async fn pause_for_mcp_input(
         &self,
-        account: &str,
         run: &str,
         id: &str,
         tool: &RunTool,
         call: &ToolCall,
     ) -> Result<bool> {
         let mut saved = self
-            .mcp_execution(account, run, id, tool, call)
+            .mcp_execution(run, id, tool, call)
             .await?
             .ok_or(Error::State("MCP 继续记录缺失"))?;
         let question = advance_input(&mut saved)?;
-        let current = self.get_run(account, run).await?;
+        let current = self.get_run(run).await?;
         let now = timestamp()?;
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
         let active: bool = sqlx::query_scalar(
-            "SELECT EXISTS(SELECT 1 FROM runs WHERE account_id=? AND id=? AND status='running')",
+            "SELECT EXISTS(SELECT 1 FROM runs WHERE id=? AND status='running')",
         )
-        .bind(account)
         .bind(run)
         .fetch_one(&mut *transaction)
         .await?;
@@ -452,21 +448,21 @@ impl Store {
                 "content": [{ "type": "text", "text": question.message }], "clarification": {
                     "id": interrupt, "question": question.message, "options": options, "status": "pending",
                 } });
-            sqlx::query("UPDATE runs SET document=json_set(document,'$.status','waiting_clarification','$.updated_at',?) WHERE account_id=? AND id=? AND status='running'")
-                .bind(&now).bind(account).bind(run).execute(&mut *transaction).await?;
-            sqlx::query("INSERT INTO clarifications(id,account_id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?,?)")
-                .bind(&interrupt).bind(account).bind(text(&current, "session_id")?).bind(run).bind(&now).bind(pending.to_string()).execute(&mut *transaction).await?;
-            sqlx::query("INSERT INTO messages(id,account_id,session_id,created_at,document) VALUES(?,?,?,?,?)")
-                .bind(&message_id).bind(account).bind(text(&current, "session_id")?).bind(&now).bind(message.to_string()).execute(&mut *transaction).await?;
-            Self::append_event_in(&mut transaction, account, text(&current, "session_id")?, run,
+            sqlx::query("UPDATE runs SET document=json_set(document,'$.status','waiting_clarification','$.updated_at',?) WHERE id=? AND status='running'")
+                .bind(&now).bind(run).execute(&mut *transaction).await?;
+            sqlx::query("INSERT INTO clarifications(id,session_id,run_id,created_at,document) VALUES(?,?,?,?,?)")
+                .bind(&interrupt).bind(text(&current, "session_id")?).bind(run).bind(&now).bind(pending.to_string()).execute(&mut *transaction).await?;
+            sqlx::query("INSERT INTO messages(id,session_id,created_at,document) VALUES(?,?,?,?)")
+                .bind(&message_id).bind(text(&current, "session_id")?).bind(&now).bind(message.to_string()).execute(&mut *transaction).await?;
+            Self::append_event_in(&mut transaction, text(&current, "session_id")?, run,
                 json!({ "type": "CUSTOM", "name": "pixoma.clarification_required", "value": pending })).await?;
-            Self::append_event_in(&mut transaction, account, text(&current, "session_id")?, run, json!({
+            Self::append_event_in(&mut transaction, text(&current, "session_id")?, run, json!({
                 "type": "RUN_FINISHED", "threadId": current["session_id"], "runId": run,
                 "outcome": { "type": "interrupt", "interrupts": [{ "id": interrupt, "reason": "input_required", "message": question.message, "metadata": pending["metadata"] }] },
             })).await?;
         }
-        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(saved.to_string()).bind(&now).bind(account).bind(run).bind(id).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=?")
+            .bind(saved.to_string()).bind(&now).bind(run).bind(id).execute(&mut *transaction).await?;
         transaction.commit().await?;
         self.notify_run_events();
         Ok(question.is_some())
@@ -474,14 +470,13 @@ impl Store {
 
     pub(crate) async fn resolve_mcp_input(
         &self,
-        account: &str,
         session: &str,
         id: &str,
         response: &Value,
     ) -> Result<Value> {
         let mut transaction = self.pool.begin_with("BEGIN IMMEDIATE").await?;
-        let row = sqlx::query("SELECT c.document,c.run_id,t.id AS call_id,t.call,t.definition,t.approved_arguments,t.status AS tool_status,m.document AS execution FROM clarifications c JOIN tool_calls t ON t.run_id=c.run_id AND t.account_id=c.account_id AND t.id=json_extract(c.document,'$.tool_call_id') JOIN mcp_executions m ON m.account_id=t.account_id AND m.run_id=t.run_id AND m.id=t.id WHERE c.account_id=? AND c.session_id=? AND c.id=? AND json_extract(c.document,'$.reason')='input_required'")
-            .bind(account).bind(session).bind(id).fetch_optional(&mut *transaction).await?.ok_or(Error::NotFound)?;
+        let row = sqlx::query("SELECT c.document,c.run_id,t.id AS call_id,t.call,t.definition,t.approved_arguments,t.status AS tool_status,m.document AS execution FROM clarifications c JOIN tool_calls t ON t.run_id=c.run_id AND t.id=json_extract(c.document,'$.tool_call_id') JOIN mcp_executions m ON m.run_id=t.run_id AND m.id=t.id WHERE c.session_id=? AND c.id=? AND json_extract(c.document,'$.reason')='input_required'")
+            .bind(session).bind(id).fetch_optional(&mut *transaction).await?.ok_or(Error::NotFound)?;
         let mut pending: Value = serde_json::from_str(row.get("document"))?;
         let run: String = row.get("run_id");
         if pending["status"] != "pending" {
@@ -489,7 +484,7 @@ impl Store {
                 return Err(Error::Invalid("MCP 输入已经收到其他答复"));
             }
             transaction.commit().await?;
-            return self.get_run(account, &run).await;
+            return self.get_run(&run).await;
         }
         let mut saved: Value = serde_json::from_str(row.get("execution"))?;
         let mut call: ToolCall = serde_json::from_str(row.get("call"))?;
@@ -606,8 +601,8 @@ impl Store {
         }
         saved["question"] = Value::Null;
         let now = timestamp()?;
-        let changed = sqlx::query("UPDATE runs SET document=json_set(document,'$.status',?,'$.updated_at',?,'$.subscription_after_sequence',(SELECT coalesce(max(sequence),0) FROM run_events WHERE run_id=?)) WHERE account_id=? AND id=? AND status='waiting_clarification'")
-            .bind(if live { "running" } else { "queued" }).bind(&now).bind(&run).bind(account).bind(&run).execute(&mut *transaction).await?;
+        let changed = sqlx::query("UPDATE runs SET document=json_set(document,'$.status',?,'$.updated_at',?,'$.subscription_after_sequence',(SELECT coalesce(max(sequence),0) FROM run_events WHERE run_id=?)) WHERE id=? AND status='waiting_clarification'")
+            .bind(if live { "running" } else { "queued" }).bind(&now).bind(&run).bind(&run).execute(&mut *transaction).await?;
         if changed.rows_affected() != 1 {
             return Err(Error::Invalid("运行已经结束或输入状态已更改"));
         }
@@ -619,24 +614,23 @@ impl Store {
         pending["status"] = json!(status);
         pending["response"] = response.clone();
         pending["updated_at"] = json!(now);
-        sqlx::query("UPDATE clarifications SET document=? WHERE account_id=? AND id=?")
+        sqlx::query("UPDATE clarifications SET document=? WHERE id=?")
             .bind(pending.to_string())
-            .bind(account)
             .bind(id)
             .execute(&mut *transaction)
             .await?;
-        sqlx::query("UPDATE messages SET document=json_set(document,'$.clarification.status',?,'$.clarification.selected',?,'$.clarification.answer',?) WHERE account_id=? AND id=? AND json_extract(document,'$.clarification.id')=?")
-            .bind(status).bind(selected).bind(answer).bind(account).bind(text(&pending["metadata"], "messageId")?).bind(id).execute(&mut *transaction).await?;
-        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(saved.to_string()).bind(&now).bind(account).bind(&run).bind(row.get::<String, _>("call_id")).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE messages SET document=json_set(document,'$.clarification.status',?,'$.clarification.selected',?,'$.clarification.answer',?) WHERE id=? AND json_extract(document,'$.clarification.id')=?")
+            .bind(status).bind(selected).bind(answer).bind(text(&pending["metadata"], "messageId")?).bind(id).execute(&mut *transaction).await?;
+        sqlx::query("UPDATE mcp_executions SET document=?,updated_at=? WHERE run_id=? AND id=?")
+            .bind(saved.to_string()).bind(&now).bind(&run).bind(row.get::<String, _>("call_id")).execute(&mut *transaction).await?;
         if live {
-            Self::append_event_in(&mut transaction, account, session, &run, json!({
+            Self::append_event_in(&mut transaction, session, &run, json!({
                 "type": "RUN_STARTED", "threadId": session, "runId": run, "metadata": { "studioRunId": run },
             })).await?;
         }
         transaction.commit().await?;
         self.notify_run_events();
-        self.get_run(account, &run).await
+        self.get_run(&run).await
     }
 }
 
@@ -665,26 +659,24 @@ mod tests {
             .tempdir_in(root)?;
         let database = directory.path().join("studio.sqlite");
         let mut store = Store::open(&database).await?;
-        let account = "mcp-elicitation-live";
-        let model = store.save_model(account, None, json!({
+        let model = store.save_model(None, json!({
             "name": "补充输入调用检查", "protocol": "openai_chat_compatible", "base_url": "http://127.0.0.1:18082/v1", "model": "input-state",
             "enabled": true, "agent_enabled": true, "default": true,
             "limits": { "context_window_tokens": 32000, "max_input_tokens": 24000, "max_output_tokens": 4000 },
             "thinking": { "enabled": false }, "capabilities": { "tools": true, "vision": false, "image_output": false, "streaming": true }
         })).await?;
-        store.save_connector(account, None, json!({
+        store.save_connector(None, json!({
             "name": "官方 SDK 输入服务", "url": std::env::var("PIXOMA_TEST_ELICIT_MCP_URL")?, "credential": "", "enabled": true, "policy": "auto",
         })).await?;
         let tool = store
-            .mcp_run_tools(account)
+            .mcp_run_tools()
             .await?
             .into_iter()
             .find(|tool| tool.display_name() == "set_enum_form")
             .ok_or("表单工具缺失")?;
-        let session = store.create_session(account, "elicitation-live").await?;
+        let session = store.create_session("elicitation-live").await?;
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "elicitation-live",
                 text(&model, "id")?,
@@ -693,13 +685,13 @@ mod tests {
             )
             .await?;
         let run = text(&queued["run"], "id")?.to_owned();
-        assert!(store.claim_run(account, &run).await?);
+        assert!(store.claim_run(&run).await?);
         let call = ToolCall::from_wire(
             "elicitation-live",
             ToolFunction::new(tool.definition.name.clone(), json!({})),
         );
-        store.save_tool_part(account, &run, 1, 0, &call).await?;
-        let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+        store.save_tool_part(&run, 1, 0, &call).await?;
+        let record = store.tool_call_records(&run, 1).await?.remove(0);
         let id = text(&record, "id")?.to_owned();
         let runtime = crate::AgentRuntime::new(store.clone());
         let received = std::sync::Arc::new(std::sync::Mutex::new(Vec::<Value>::new()));
@@ -718,7 +710,6 @@ mod tests {
         let subscription = tokio::spawn(async move {
             runtime
                 .forward_events(
-                    account,
                     &event_run,
                     0,
                     channel,
@@ -732,27 +723,27 @@ mod tests {
         let worker_call = call.clone();
         let worker = tokio::spawn(async move {
             worker_store
-                .execute_local_tool(account, &worker_run, &record, &worker_tool, &worker_call)
+                .execute_local_tool(&worker_run, &record, &worker_tool, &worker_call)
                 .await
         });
         let mut answered = std::collections::BTreeSet::new();
         for _ in 0..4 {
             let pending = tokio::time::timeout(std::time::Duration::from_secs(15), async {
                 loop {
-                    let pending: Option<String> = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
-                        .bind(account).bind(&run).fetch_optional(&store.pool).await?;
+                    let pending: Option<String> = sqlx::query_scalar("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending'")
+                        .bind(&run).fetch_optional(&store.pool).await?;
                     if let Some(pending) = pending {
                         let pending: Value = serde_json::from_str(&pending)?;
                         if !answered.contains(text(&pending, "id")?) {
                             let saved = store
-                                .mcp_execution(account, &run, &id, &tool, &call)
+                                .mcp_execution(&run, &id, &tool, &call)
                                 .await?
                                 .ok_or(crate::Error::State("MCP 输入记录缺失"))?;
                             return Ok::<_, crate::Error>((pending, saved));
                         }
                     }
                     if worker.is_finished() {
-                        let records = store.tool_call_records(account, &run, 1).await?;
+                        let records = store.tool_call_records(&run, 1).await?;
                         return Err(crate::Error::Mcp(format!("MCP 调用提前结束：{records:?}")));
                     }
                     tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -762,9 +753,9 @@ mod tests {
             let (pending, saved) = match pending {
                 Ok(result) => result?,
                 Err(error) => {
-                    let current = store.get_run(account, &run).await?;
+                    let current = store.get_run(&run).await?;
                     let execution = store
-                        .mcp_execution(account, &run, &id, &tool, &call)
+                        .mcp_execution(&run, &id, &tool, &call)
                         .await?;
                     return Err(format!("等待第 {} 个 MCP 输入超时：{error}；运行状态={}；调用完成={}；输入记录={execution:?}", answered.len() + 1, current["status"], worker.is_finished()).into());
                 }
@@ -798,7 +789,7 @@ mod tests {
                     tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
                     assert!(!worker.is_finished());
                     assert_eq!(
-                        store.get_run(account, &run).await?["status"],
+                        store.get_run(&run).await?["status"],
                         "waiting_clarification"
                     );
                 }
@@ -812,7 +803,7 @@ mod tests {
             };
             let answer = json!({ "interruptId": pending["id"], "status": "resolved", "payload": { "selected": "other", "custom": custom } });
             store
-                .resolve_run_interrupt(account, &session.id, &answer)
+                .resolve_run_interrupt(&session.id, &answer)
                 .await?;
             answered.insert(text(&pending, "id")?.to_owned());
         }
@@ -829,12 +820,11 @@ mod tests {
             matches!(result, rig::message::UserContent::ToolResult(result) if !result.is_error)
         );
         subscription.await??;
-        let record = store.tool_call_records(account, &run, 1).await?.remove(0);
+        let record = store.tool_call_records(&run, 1).await?.remove(0);
         assert_eq!(record["status"], "succeeded");
         let raw: String = sqlx::query_scalar(
-            "SELECT raw_result FROM tool_calls WHERE account_id=? AND run_id=? AND id=?",
+            "SELECT raw_result FROM tool_calls WHERE run_id=? AND id=?",
         )
-        .bind(account)
         .bind(&run)
         .bind(&id)
         .fetch_one(&store.pool)
@@ -849,12 +839,12 @@ mod tests {
         ] {
             assert!(content.contains(expected), "{content}");
         }
-        store.finish_run(account, &run, "succeeded", None).await?;
+        store.finish_run(&run, "succeeded", None).await?;
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 0);
         let saved = store
-            .mcp_execution(account, &run, &id, &tool, &call)
+            .mcp_execution(&run, &id, &tool, &call)
             .await?
             .ok_or("原始响应缺失")?;
         assert_eq!(saved["response"], raw);
@@ -876,17 +866,15 @@ mod tests {
             .tempdir_in(root)?;
         let database = directory.path().join("studio.sqlite");
         let mut store = Store::open(&database).await?;
-        let account = "mcp-inputs";
-        let model = store.save_model(account, None, json!({
+        let model = store.save_model(None, json!({
             "name": "补充输入检查", "protocol": "openai_chat_compatible", "base_url": "http://127.0.0.1:18082/v1", "model": "input-state",
             "enabled": true, "agent_enabled": true, "default": true,
             "limits": { "context_window_tokens": 32000, "max_input_tokens": 24000, "max_output_tokens": 4000 },
             "thinking": { "enabled": false }, "capabilities": { "tools": true, "vision": false, "image_output": false, "streaming": true }
         })).await?;
-        let session = store.create_session(account, "inputs").await?;
+        let session = store.create_session("inputs").await?;
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "inputs",
                 text(&model, "id")?,
@@ -895,7 +883,7 @@ mod tests {
             )
             .await?;
         let run = text(&queued["run"], "id")?;
-        assert!(store.claim_run(account, run).await?);
+        assert!(store.claim_run(run).await?);
         let tool = RunTool {
             definition: ToolDefinition::new(
                 ToolName::new("write_contact")?,
@@ -906,7 +894,6 @@ mod tests {
                 connector_id: "input-check".to_owned(),
                 url: "http://127.0.0.1:18082/mcp".to_owned(),
                 name: "write_contact".to_owned(),
-                credential_ref: None,
             },
             requires_approval: true,
             read_only: false,
@@ -915,11 +902,11 @@ mod tests {
             "input-check",
             ToolFunction::new(tool.definition.name.clone(), json!({})),
         );
-        store.save_tool_part(account, run, 1, 0, &call).await?;
-        let record = store.tool_call_records(account, run, 1).await?.remove(0);
+        store.save_tool_part(run, 1, 0, &call).await?;
+        let record = store.tool_call_records(run, 1).await?.remove(0);
         let id = text(&record, "id")?;
-        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(serde_json::to_string(&tool)?).bind(account).bind(run).bind(id).execute(&store.pool).await?;
+        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE run_id=? AND id=?")
+            .bind(serde_json::to_string(&tool)?).bind(run).bind(id).execute(&store.pool).await?;
         let opaque = "原样保存的状态\0{未解析}";
         let mut input: InputRequiredResult = serde_json::from_value(json!({
             "resultType": "input_required", "requestState": opaque, "_meta": { "trace": "form" },
@@ -951,7 +938,6 @@ mod tests {
         }
         store
             .save_mcp_inputs(
-                account,
                 run,
                 id,
                 &tool,
@@ -961,32 +947,32 @@ mod tests {
             .await?;
         assert!(
             store
-                .pause_for_mcp_input(account, run, id, &tool, &call)
+                .pause_for_mcp_input(run, id, &tool, &call)
                 .await?
         );
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 0);
-        let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
-            .bind(account).bind(run).fetch_one(&store.pool).await?;
+        let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending'")
+            .bind(run).fetch_one(&store.pool).await?;
         let pending: Value = serde_json::from_str(&pending)?;
         let answer = json!({ "interruptId": pending["id"], "status": "resolved", "payload": { "selected": "other", "custom": "bad-email" } });
         assert!(
             store
-                .resolve_run_interrupt(account, &session.id, &answer)
+                .resolve_run_interrupt(&session.id, &answer)
                 .await
                 .is_err()
         );
         let answer = json!({ "interruptId": pending["id"], "status": "resolved", "payload": { "selected": "other", "custom": "input@example.com" } });
         assert!(
             store
-                .resolve_run_interrupt("another-account", &session.id, &answer)
+                .resolve_run_interrupt("missing-session", &answer)
                 .await
                 .is_err()
         );
         let (first, second) = tokio::join!(
-            store.resolve_run_interrupt(account, &session.id, &answer),
-            store.resolve_run_interrupt(account, &session.id, &answer)
+            store.resolve_run_interrupt(&session.id, &answer),
+            store.resolve_run_interrupt(&session.id, &answer)
         );
         assert_eq!(first?["id"], run);
         assert_eq!(second?["id"], run);
@@ -995,35 +981,35 @@ mod tests {
             ("labels", Some("[\"work\",\"home\"]")),
             ("note", None),
         ] {
-            assert!(store.claim_run(account, run).await?);
+            assert!(store.claim_run(run).await?);
             assert!(
                 store
-                    .pause_for_mcp_input(account, run, id, &tool, &call)
+                    .pause_for_mcp_input(run, id, &tool, &call)
                     .await?
             );
             let saved = store
-                .mcp_execution(account, run, id, &tool, &call)
+                .mcp_execution(run, id, &tool, &call)
                 .await?
                 .ok_or("继续记录缺失")?;
             assert_eq!(saved["question"]["field"], field);
-            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
-                .bind(account).bind(run).fetch_one(&store.pool).await?;
+            let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending'")
+                .bind(run).fetch_one(&store.pool).await?;
             let pending: Value = serde_json::from_str(&pending)?;
             let answer = json!({ "interruptId": pending["id"], "status": "resolved", "payload": {
                 "selected": if custom.is_some() { "other" } else { "omit" }, "custom": custom,
             } });
             store
-                .resolve_run_interrupt(account, &session.id, &answer)
+                .resolve_run_interrupt(&session.id, &answer)
                 .await?;
         }
-        assert!(store.claim_run(account, run).await?);
+        assert!(store.claim_run(run).await?);
         assert!(
             !store
-                .pause_for_mcp_input(account, run, id, &tool, &call)
+                .pause_for_mcp_input(run, id, &tool, &call)
                 .await?
         );
         let saved = store
-            .mcp_execution(account, run, id, &tool, &call)
+            .mcp_execution(run, id, &tool, &call)
             .await?
             .ok_or("继续记录缺失")?;
         assert_eq!(saved["status"], "ready");
@@ -1036,16 +1022,16 @@ mod tests {
         } })
         );
         assert_eq!(
-            store.tool_call_records(account, run, 1).await?[0]["status"],
+            store.tool_call_records(run, 1).await?[0]["status"],
             "waiting_mcp"
         );
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 1);
-        assert_eq!(store.get_run(account, run).await?["status"], "queued");
-        assert!(store.claim_run(account, run).await?);
+        assert_eq!(store.get_run(run).await?["status"], "queued");
+        assert!(store.claim_run(run).await?);
         let request = store
-            .begin_mcp_continuation(account, run, id, &tool, &call)
+            .begin_mcp_continuation(run, id, &tool, &call)
             .await?;
         assert_eq!(request.request_state.as_deref(), Some(opaque));
         assert_eq!(request.name.as_ref(), "write_contact");
@@ -1058,22 +1044,21 @@ mod tests {
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 1);
         assert_eq!(
-            store.get_run(account, run).await?["error_code"],
+            store.get_run(run).await?["error_code"],
             "tool_result_unknown"
         );
         assert_eq!(
-            store.tool_call_records(account, run, 1).await?[0]["status"],
+            store.tool_call_records(run, 1).await?[0]["status"],
             "result_unknown"
         );
         assert!(
             store
-                .begin_mcp_continuation(account, run, id, &tool, &call)
+                .begin_mcp_continuation(run, id, &tool, &call)
                 .await
                 .is_err()
         );
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "live-inputs",
                 text(&model, "id")?,
@@ -1082,21 +1067,21 @@ mod tests {
             )
             .await?;
         let live_run = text(&queued["run"], "id")?;
-        assert!(store.claim_run(account, live_run).await?);
+        assert!(store.claim_run(live_run).await?);
         let live_call = ToolCall::from_wire(
             "live-input",
             ToolFunction::new(tool.definition.name.clone(), json!({})),
         );
         store
-            .save_tool_part(account, live_run, 1, 0, &live_call)
+            .save_tool_part(live_run, 1, 0, &live_call)
             .await?;
         let record = store
-            .tool_call_records(account, live_run, 1)
+            .tool_call_records(live_run, 1)
             .await?
             .remove(0);
         let live_id = text(&record, "id")?;
-        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(serde_json::to_string(&tool)?).bind(account).bind(live_run).bind(live_id).execute(&store.pool).await?;
+        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE run_id=? AND id=?")
+            .bind(serde_json::to_string(&tool)?).bind(live_run).bind(live_id).execute(&store.pool).await?;
         let input = rmcp::model::ElicitRequestParams::FormElicitationParams {
             meta: None,
             message: "确认联系信息".to_owned(),
@@ -1106,7 +1091,6 @@ mod tests {
         };
         store
             .save_mcp_inputs(
-                account,
                 live_run,
                 live_id,
                 &tool,
@@ -1116,14 +1100,14 @@ mod tests {
             .await?;
         assert!(
             store
-                .pause_for_mcp_input(account, live_run, live_id, &tool, &live_call)
+                .pause_for_mcp_input(live_run, live_id, &tool, &live_call)
                 .await?
         );
-        let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending'")
-            .bind(account).bind(live_run).fetch_one(&store.pool).await?;
+        let pending: String = sqlx::query_scalar("SELECT document FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending'")
+            .bind(live_run).fetch_one(&store.pool).await?;
         let pending: Value = serde_json::from_str(&pending)?;
         let before = store
-            .run_events_after(account, live_run, 0)
+            .run_events_after(live_run, 0)
             .await?
             .last()
             .ok_or("输入事件缺失")?["sequence"]
@@ -1132,13 +1116,13 @@ mod tests {
         let answer = json!({ "interruptId": pending["id"], "status": "resolved", "payload": { "selected": "value-0" } });
         assert_eq!(
             store
-                .resolve_run_interrupt(account, &session.id, &answer)
+                .resolve_run_interrupt(&session.id, &answer)
                 .await?["status"],
             "running"
         );
         assert_eq!(
             store
-                .run_events_after(account, live_run, before)
+                .run_events_after(live_run, before)
                 .await?
                 .first()
                 .and_then(|event| event["type"].as_str()),
@@ -1146,26 +1130,25 @@ mod tests {
         );
         assert!(
             store
-                .pause_for_mcp_input(account, live_run, live_id, &tool, &live_call)
+                .pause_for_mcp_input(live_run, live_id, &tool, &live_call)
                 .await?
         );
         store.close().await;
         store = Store::open(&database).await?;
         assert_eq!(store.recover_interrupted_runs().await?, 1);
         assert_eq!(
-            store.get_run(account, live_run).await?["error_code"],
+            store.get_run(live_run).await?["error_code"],
             "tool_result_unknown"
         );
-        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending')")
-            .bind(account).bind(live_run).fetch_one(&store.pool).await?;
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending')")
+            .bind(live_run).fetch_one(&store.pool).await?;
         assert!(!pending);
         assert_eq!(
-            store.tool_call_records(account, live_run, 1).await?[0]["status"],
+            store.tool_call_records(live_run, 1).await?[0]["status"],
             "result_unknown"
         );
         let queued = store
             .queue_run(
-                account,
                 &session.id,
                 "withdrawn-input",
                 text(&model, "id")?,
@@ -1174,20 +1157,19 @@ mod tests {
             )
             .await?;
         let withdrawn_run = text(&queued["run"], "id")?;
-        assert!(store.claim_run(account, withdrawn_run).await?);
+        assert!(store.claim_run(withdrawn_run).await?);
         store
-            .save_tool_part(account, withdrawn_run, 1, 0, &live_call)
+            .save_tool_part(withdrawn_run, 1, 0, &live_call)
             .await?;
         let record = store
-            .tool_call_records(account, withdrawn_run, 1)
+            .tool_call_records(withdrawn_run, 1)
             .await?
             .remove(0);
         let withdrawn_id = text(&record, "id")?;
-        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE account_id=? AND run_id=? AND id=?")
-            .bind(serde_json::to_string(&tool)?).bind(account).bind(withdrawn_run).bind(withdrawn_id).execute(&store.pool).await?;
+        sqlx::query("UPDATE tool_calls SET status='executing',definition=? WHERE run_id=? AND id=?")
+            .bind(serde_json::to_string(&tool)?).bind(withdrawn_run).bind(withdrawn_id).execute(&store.pool).await?;
         store
             .save_mcp_inputs(
-                account,
                 withdrawn_run,
                 withdrawn_id,
                 &tool,
@@ -1197,14 +1179,13 @@ mod tests {
             .await?;
         assert!(
             store
-                .pause_for_mcp_input(account, withdrawn_run, withdrawn_id, &tool, &live_call)
+                .pause_for_mcp_input(withdrawn_run, withdrawn_id, &tool, &live_call)
                 .await?
         );
         let result = rmcp::model::CallToolResult::success(Vec::new());
         assert!(
             store
                 .save_mcp_completion(
-                    account,
                     withdrawn_run,
                     withdrawn_id,
                     &tool,
@@ -1215,32 +1196,31 @@ mod tests {
                 .is_err()
         );
         store
-            .close_live_mcp_input(account, withdrawn_run, withdrawn_id, &tool, &live_call)
+            .close_live_mcp_input(withdrawn_run, withdrawn_id, &tool, &live_call)
             .await?;
         assert_eq!(
-            store.get_run(account, withdrawn_run).await?["status"],
+            store.get_run(withdrawn_run).await?["status"],
             "running"
         );
         let event_count = store
-            .run_events_after(account, withdrawn_run, 0)
+            .run_events_after(withdrawn_run, 0)
             .await?
             .len();
         store
-            .close_live_mcp_input(account, withdrawn_run, withdrawn_id, &tool, &live_call)
+            .close_live_mcp_input(withdrawn_run, withdrawn_id, &tool, &live_call)
             .await?;
         assert_eq!(
             store
-                .run_events_after(account, withdrawn_run, 0)
+                .run_events_after(withdrawn_run, 0)
                 .await?
                 .len(),
             event_count
         );
-        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clarifications WHERE account_id=? AND run_id=? AND json_extract(document,'$.status')='pending')")
-            .bind(account).bind(withdrawn_run).fetch_one(&store.pool).await?;
+        let pending: bool = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM clarifications WHERE run_id=? AND json_extract(document,'$.status')='pending')")
+            .bind(withdrawn_run).fetch_one(&store.pool).await?;
         assert!(!pending);
         store
             .save_mcp_completion(
-                account,
                 withdrawn_run,
                 withdrawn_id,
                 &tool,
@@ -1249,20 +1229,20 @@ mod tests {
             )
             .await?;
         let saved = store
-            .mcp_execution(account, withdrawn_run, withdrawn_id, &tool, &live_call)
+            .mcp_execution(withdrawn_run, withdrawn_id, &tool, &live_call)
             .await?
             .ok_or("MCP 完整结果缺失")?;
         assert_eq!(saved["response"], serde_json::to_value(result)?);
         assert_eq!(saved["input"]["status"], "closed");
         assert!(
             store
-                .run_events_after(account, withdrawn_run, 0)
+                .run_events_after(withdrawn_run, 0)
                 .await?
                 .iter()
                 .any(|event| event["type"] == "RUN_STARTED")
         );
         store
-            .finish_run(account, withdrawn_run, "succeeded", None)
+            .finish_run(withdrawn_run, "succeeded", None)
             .await?;
         store.close().await;
         Ok(())
